@@ -48,7 +48,7 @@
                 <span>Back</span>
             </a>
             <div class="chapter-info-compact">
-                <span class="compact-title"><?php echo esc_html($manga_title); ?></span>
+                <span class="compact-title" title="<?php echo esc_attr($manga_title); ?>"><?php echo esc_html($manga_title); ?></span>
                 <span class="compact-chapter"><?php echo esc_html($display_chapter_text); ?></span>
             </div>
         </div>
@@ -495,13 +495,46 @@
    ============================================ */
 .reader-top-bar {
     padding: 12px 24px;
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    column-gap: 12px;
     align-items: center;
     z-index: 101;
     max-height: 80px;
     overflow: hidden;
     transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.2s ease, transform 0.3s ease;
+}
+
+.reader-top-bar-left {
+    min-width: 0;
+    overflow: hidden;
+}
+
+#backToMangaBtn {
+    flex: none;
+}
+
+.reader-top-bar-center {
+    min-width: 0;
+    justify-self: center;
+}
+
+.reader-top-bar-right {
+    justify-self: end;
+}
+
+.chapter-info-compact {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+}
+
+.compact-title,
+.compact-chapter {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .reader-top-bar.is-hidden {
@@ -820,9 +853,16 @@
 }
 
 /* Responsive */
+@media (max-width: 900px) {
+    .chapter-info-compact {
+        display: none;
+    }
+}
+
 @media (max-width: 768px) {
     .reader-top-bar {
         padding: 10px 16px;
+        column-gap: 8px;
     }
 
     .reader-top-bar .chapter-nav {
@@ -875,9 +915,10 @@
     }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 640px) {
     .reader-top-bar {
-        flex-wrap: wrap;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas: "left right" "center center";
         gap: 4px;
         padding: 6px 8px;
         max-height: 108px;
@@ -887,20 +928,24 @@
         max-height: 0;
     }
 
-    .reader-top-bar-left,
+    .reader-top-bar-left {
+        grid-area: left;
+    }
+
     .reader-top-bar-right {
-        gap: 4px;
+        grid-area: right;
     }
 
     .reader-top-bar-center {
-        order: 3;
-        flex: 0 0 100%;
+        grid-area: center;
+        width: 100%;
         justify-content: center;
         min-width: 0;
     }
 
     .chapter-nav {
         gap: 4px;
+        max-width: 100%;
     }
 
     .chapter-nav .reader-nav-btn {
