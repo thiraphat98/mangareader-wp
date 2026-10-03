@@ -34,7 +34,7 @@
                 foreach ($popular_manga as $index => $manga):
                     $manga_id = $manga->ID;
                     $manga_title = get_the_title($manga_id);
-                    $manga_cover = has_post_thumbnail($manga_id) ? get_the_post_thumbnail_url($manga_id, 'medium') : 'https://via.placeholder.com/200x280?text=No+Cover';
+                    $manga_cover = manga_get_cover_url($manga_id, 'medium');
                     
                     // Get genres
                     $genres = wp_get_post_terms($manga_id, 'genre');
@@ -63,18 +63,12 @@
                     // Get formatted latest chapter display
                     $latest_display = '';
                     if ($latest_chapter) {
-                        $vol_num = get_post_meta($latest_chapter->ID, 'volume_number', true);
-                        $chap_num = get_post_meta($latest_chapter->ID, 'chapter_number', true);
-                        if ($vol_num) {
-                            $latest_display = "Vol. {$vol_num} Ch. {$chap_num}";
-                        } else {
-                            $latest_display = "Ch. {$chap_num}";
-                        }
+                        $latest_display = manga_chapter_display_label($latest_chapter->ID);
                     }
                     ?>
                     <div class="featured-item">
                         <div class="featured-cover">
-                            <img src="<?php echo esc_url($manga_cover); ?>" alt="<?php echo esc_attr($manga_title); ?>">
+                            <img src="<?php echo esc_url($manga_cover); ?>" alt="<?php echo esc_attr($manga_title); ?>" loading="eager" fetchpriority="high" decoding="async">
                             <div class="featured-overlay">
                                 <a href="<?php echo get_permalink($manga_id); ?>" class="featured-btn">View Details</a>
                             </div>
@@ -131,7 +125,7 @@
                     while ($manga_query->have_posts()) : $manga_query->the_post();
                         $manga_id = get_the_ID();
                         $manga_title = get_the_title();
-                        $manga_cover = has_post_thumbnail() ? get_the_post_thumbnail_url(get_the_ID(), 'manga-cover-small') : 'https://via.placeholder.com/180x252?text=No+Cover';
+                        $manga_cover = manga_get_cover_url(get_the_ID(), 'manga-cover-small');
                         
                         // Get chapters sorted by volume and chapter number
                         $all_chapters = get_sorted_chapters_for_manga($manga_id);
@@ -140,16 +134,14 @@
                         <div class="manga-item">
                             <div class="manga-item-cover">
                                 <a href="<?php the_permalink(); ?>">
-                                    <img src="<?php echo esc_url($manga_cover); ?>" alt="<?php echo esc_attr($manga_title); ?>">
+                                    <img src="<?php echo esc_url($manga_cover); ?>" alt="<?php echo esc_attr($manga_title); ?>" loading="lazy" decoding="async">
                                     <div class="manga-item-overlay">
                                         <span class="view-details">View Details</span>
                                     </div>
                                 </a>
                                 <?php if (!empty($recent_chapters)): 
                                     $latest = $recent_chapters[0];
-                                    $vol_num = get_post_meta($latest->ID, 'volume_number', true);
-                                    $chap_num = get_post_meta($latest->ID, 'chapter_number', true);
-                                    $badge_text = $vol_num ? "Vol. {$vol_num} Ch. {$chap_num}" : "Ch. {$chap_num}";
+                                    $badge_text = manga_chapter_display_label($latest->ID);
                                 ?>
                                     <div class="latest-chapter-badge">
                                         <?php echo esc_html($badge_text); ?>
@@ -163,9 +155,7 @@
                                 <?php if (!empty($recent_chapters)) : ?>
                                     <div class="manga-item-chapters">
                                         <?php foreach ($recent_chapters as $chapter) : 
-                                            $vol_num = get_post_meta($chapter->ID, 'volume_number', true);
-                                            $chap_num = get_post_meta($chapter->ID, 'chapter_number', true);
-                                            $display_text = $vol_num ? "Vol. {$vol_num} Ch. {$chap_num}" : "Ch. {$chap_num}";
+                                            $display_text = manga_chapter_display_label($chapter->ID);
                                             $chapter_date = get_the_date('M j, Y', $chapter->ID);
                                         ?>
                                             <a href="<?php echo get_permalink($chapter->ID); ?>" class="chapter-link">

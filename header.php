@@ -77,7 +77,7 @@
                         </svg>
                     </button>
                     
-                    <button class="mobile-menu-toggle" id="mobileMenuToggle">
+                    <button class="mobile-menu-toggle" id="mobileMenuToggle" type="button" aria-label="Open menu" aria-expanded="false">
                         <span></span>
                         <span></span>
                         <span></span>
@@ -224,28 +224,42 @@
     }
 })();
 
-// Mobile Menu Toggle
+// Mobile menu state is managed in one place so one tap changes it once.
 (function() {
     const mobileToggle = document.getElementById('mobileMenuToggle');
     const mainNav = document.querySelector('.main-nav');
-    
-    if (mobileToggle && mainNav) {
-        mobileToggle.addEventListener('click', function() {
-            mainNav.classList.toggle('active');
-            this.classList.toggle('active');
-            
-            // Animate hamburger to X
-            const spans = this.querySelectorAll('span');
-            if (mainNav.classList.contains('active')) {
-                spans[0].style.transform = 'rotate(45deg) translate(5px, 5px)';
-                spans[1].style.opacity = '0';
-                spans[2].style.transform = 'rotate(-45deg) translate(7px, -7px)';
-            } else {
-                spans[0].style.transform = 'none';
-                spans[1].style.opacity = '1';
-                spans[2].style.transform = 'none';
-            }
-        });
+    if (!mobileToggle || !mainNav) return;
+
+    function setMobileMenuOpen(open) {
+        mainNav.classList.toggle('active', open);
+        mobileToggle.classList.toggle('active', open);
+        document.body.classList.toggle('menu-open', open);
+        mobileToggle.setAttribute('aria-expanded', String(open));
+
+        const spans = mobileToggle.querySelectorAll('span');
+        if (spans.length === 3) {
+            spans[0].style.transform = open ? 'rotate(45deg) translate(5px, 5px)' : 'none';
+            spans[1].style.opacity = open ? '0' : '1';
+            spans[2].style.transform = open ? 'rotate(-45deg) translate(7px, -7px)' : 'none';
+        }
     }
+
+    mobileToggle.setAttribute('aria-expanded', 'false');
+    mobileToggle.addEventListener('click', function() {
+        setMobileMenuOpen(!mainNav.classList.contains('active'));
+    });
+
+    mainNav.addEventListener('click', function(event) {
+        const link = event.target.closest('a');
+        if (window.innerWidth <= 768 && link && !link.parentElement.classList.contains('menu-item-has-children')) {
+            setMobileMenuOpen(false);
+        }
+    });
+
+    window.addEventListener('resize', function() {
+        if (window.innerWidth > 768 && mainNav.classList.contains('active')) {
+            setMobileMenuOpen(false);
+        }
+    });
 })();
 </script>

@@ -1,7 +1,7 @@
 <?php
 $manga_id = get_the_ID();
 $manga_title = get_the_title();
-$manga_cover = has_post_thumbnail() ? get_the_post_thumbnail_url(get_the_ID(), 'manga-cover-small') : 'https://via.placeholder.com/180x252?text=No+Cover';
+$manga_cover = manga_get_cover_url(get_the_ID(), 'manga-cover-small');
 
 $latest_chapter = get_posts(array(
     'post_type' => 'chapter',
@@ -27,7 +27,7 @@ if (!empty($latest_chapter)) {
 <div class="manga-item">
     <div class="manga-item-cover">
         <a href="<?php the_permalink(); ?>">
-            <img src="<?php echo esc_url($manga_cover); ?>" alt="<?php echo esc_attr($manga_title); ?>">
+            <img src="<?php echo esc_url($manga_cover); ?>" alt="<?php echo esc_attr($manga_title); ?>" loading="lazy" decoding="async">
             <div class="manga-item-overlay">
                 <span class="view-details">View Details</span>
             </div>

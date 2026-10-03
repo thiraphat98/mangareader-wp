@@ -6,11 +6,7 @@
     <div class="single-manga">
         <div class="manga-header">
             <div class="manga-cover-wrapper">
-                <?php if (has_post_thumbnail()): ?>
-                    <?php the_post_thumbnail('large', array('class' => 'manga-cover-large')); ?>
-                <?php else: ?>
-                    <img src="https://via.placeholder.com/300x420?text=No+Cover" class="manga-cover-large">
-                <?php endif; ?>
+                <img src="<?php echo esc_url(manga_get_cover_url(get_the_ID(), 'large')); ?>" class="manga-cover-large" alt="<?php echo esc_attr(get_the_title()); ?>" loading="eager" fetchpriority="high" decoding="async">
             </div>
             
             <div class="manga-details">
@@ -27,22 +23,22 @@
                 function get_chapter_display_info($chapter_id) {
                     $chapter_num = get_post_meta($chapter_id, 'chapter_number', true);
                     $volume_num = get_post_meta($chapter_id, 'volume_number', true);
+                    $volume_only = get_post_meta($chapter_id, '_manga_source_group', true) === 'volume';
                     $title = get_the_title($chapter_id);
+                    $parsed = manga_parse_chapter_title($title);
                     
                     if (empty($chapter_num)) {
-                        preg_match('/(?:Ch\.?\s*)(\d+(?:\.\d+)?)/i', $title, $matches);
-                        $chapter_num = isset($matches[1]) ? $matches[1] : '?';
+                        $chapter_num = $volume_only ? 0 : ($parsed['chapter'] > 0 ? $parsed['chapter'] : '?');
                     }
                     
                     if (empty($volume_num)) {
-                        preg_match('/(?:Vol\.?\s*)(\d+)/i', $title, $matches);
-                        $volume_num = isset($matches[1]) ? intval($matches[1]) : 0;
+                        $volume_num = $parsed['volume'];
                     }
                     
                     return array(
                         'chapter' => floatval($chapter_num),
-                        'volume' => intval($volume_num),
-                        'display' => $volume_num ? "Vol. {$volume_num} Ch. {$chapter_num}" : "Ch. {$chapter_num}",
+                        'volume' => (float) $volume_num,
+                        'display' => $volume_only ? "Vol. {$volume_num}" : ($volume_num ? "Vol. {$volume_num} Ch. {$chapter_num}" : "Ch. {$chapter_num}"),
                         'sort_key' => ($volume_num * 1000) + floatval($chapter_num)
                     );
                 }

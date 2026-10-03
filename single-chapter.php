@@ -5,67 +5,19 @@
     $volume_num = get_post_meta(get_the_ID(), 'volume_number', true);
     $manga_id = get_post_meta(get_the_ID(), 'connected_manga_id', true);
     
+    $parsed_chapter = manga_parse_chapter_title(get_the_title());
     if (empty($chapter_num)) {
-        preg_match('/(?:Ch\.?\s*)(\d+(?:\.\d+)?)/i', get_the_title(), $matches);
-        $chapter_num = isset($matches[1]) ? $matches[1] : '?';
+        $chapter_num = $parsed_chapter['chapter'] > 0 ? $parsed_chapter['chapter'] : '?';
     }
-    
-    if (empty($volume_num)) {
-        preg_match('/(?:Vol\.?\s*)(\d+)/i', get_the_title(), $matches);
-        $volume_num = isset($matches[1]) ? $matches[1] : '';
+    if (empty($volume_num) && $parsed_chapter['volume'] > 0) {
+        $volume_num = $parsed_chapter['volume'];
     }
     
     $manga_title = $manga_id ? get_the_title($manga_id) : 'Unknown Manga';
-    $images = get_post_meta(get_the_ID(), 'image_links', true);
+    $images = manga_get_chapter_image_urls(get_the_ID());
     
-    if (!empty($images)) {
-        $images = explode("\n", $images);
-        $images = array_map('trim', $images);
-        $images = array_filter($images);
-    } else {
-        $images = array();
-    }
-    
-    // Get all chapters for this manga (Ordered descending: e.g., Ch 3, Ch 2, Ch 1)
-    $all_chapters = get_posts(array(
-        'post_type' => 'chapter',
-        'posts_per_page' => -1,
-        'meta_key' => 'connected_manga_id',
-        'meta_value' => $manga_id,
-        'post_status' => 'publish',
-        'orderby' => 'meta_value_num',
-        'meta_key' => 'chapter_number',
-        'order' => 'DESC'
-    ));
-    
-    // If the above query fails, try alternative query
-    if (empty($all_chapters) && $manga_id) {
-        $all_chapters = get_posts(array(
-            'post_type' => 'chapter',
-            'posts_per_page' => -1,
-            'meta_query' => array(
-                array(
-                    'key' => 'connected_manga_id',
-                    'value' => $manga_id,
-                    'compare' => '='
-                )
-            ),
-            'post_status' => 'publish'
-        ));
-        
-        // Sort by volume and chapter number manually (Descending)
-        usort($all_chapters, function($a, $b) {
-            $vol_a = get_post_meta($a->ID, 'volume_number', true) ?: 0;
-            $vol_b = get_post_meta($b->ID, 'volume_number', true) ?: 0;
-            $chap_a = get_post_meta($a->ID, 'chapter_number', true) ?: 0;
-            $chap_b = get_post_meta($b->ID, 'chapter_number', true) ?: 0;
-            
-            if ($vol_a != $vol_b) {
-                return $vol_b - $vol_a;
-            }
-            return $chap_b - $chap_a;
-        });
-    }
+    // Descending order means the previous chapter is a smaller index and the next chapter a larger one.
+    $all_chapters = $manga_id ? get_sorted_chapters_for_manga($manga_id) : array();
     
     $current_index = -1;
     foreach ($all_chapters as $index => $chapter) {
@@ -75,15 +27,14 @@
         }
     }
     
-    // FIX: Swapped the array index math to align chronological direction with the descending order list
-    $prev_chapter = ($current_index < count($all_chapters) - 1 && isset($all_chapters[$current_index + 1])) ? $all_chapters[$current_index + 1] : null;
+    $prev_chapter = ($current_index >= 0 && isset($all_chapters[$current_index + 1])) ? $all_chapters[$current_index + 1] : null;
     $next_chapter = ($current_index > 0 && isset($all_chapters[$current_index - 1])) ? $all_chapters[$current_index - 1] : null;
     
     $manga_url = $manga_id ? get_permalink($manga_id) : '#';
     $total_pages = count($images);
     
     // Get formatted display text for current chapter
-    $display_chapter_text = $volume_num ? "Vol. {$volume_num} Ch. {$chapter_num}" : "Ch. {$chapter_num}";
+    $display_chapter_text = manga_chapter_display_label(get_the_ID());
 ?>
 
 <div class="manga-reader-container" id="mangaReaderContainer" data-current-bg="dark">
@@ -129,16 +80,15 @@
                             foreach ($chapters_for_dropdown as $chapter): 
                                 $chap_num = get_post_meta($chapter->ID, 'chapter_number', true);
                                 $vol_num = get_post_meta($chapter->ID, 'volume_number', true);
+                                $parsed_option_chapter = manga_parse_chapter_title($chapter->post_title);
                                 if (empty($chap_num)) {
-                                    preg_match('/(?:Ch\.?\s*)(\d+(?:\.\d+)?)/i', $chapter->post_title, $matches);
-                                    $chap_num = isset($matches[1]) ? $matches[1] : '?';
+                                    $chap_num = $parsed_option_chapter['chapter'] > 0 ? $parsed_option_chapter['chapter'] : '?';
                                 }
-                                if (empty($vol_num)) {
-                                    preg_match('/(?:Vol\.?\s*)(\d+)/i', $chapter->post_title, $matches);
-                                    $vol_num = isset($matches[1]) ? $matches[1] : '';
+                                if (empty($vol_num) && $parsed_option_chapter['volume'] > 0) {
+                                    $vol_num = $parsed_option_chapter['volume'];
                                 }
                                 $selected = ($chapter->ID == get_the_ID()) ? 'selected' : '';
-                                $display_text = $vol_num ? "Vol. {$vol_num} Ch. {$chap_num}" : "Ch. {$chap_num}";
+                                $display_text = manga_chapter_display_label($chapter->ID);
                             ?>
                                 <option value="<?php echo get_permalink($chapter->ID); ?>" <?php echo $selected; ?>>
                                     <?php echo esc_html($display_text); ?>
@@ -194,7 +144,7 @@
             <?php if (!empty($images)): ?>
                 <?php foreach ($images as $index => $image): ?>
                     <div class="reader-page" data-page="<?php echo $index; ?>">
-                        <img src="<?php echo esc_url($image); ?>" alt="Page <?php echo $index + 1; ?>" loading="lazy" data-page-index="<?php echo $index; ?>">
+                        <img <?php if (0 === $index): ?>src="<?php echo esc_url($image); ?>" loading="eager" fetchpriority="high"<?php else: ?>data-src="<?php echo esc_url($image); ?>" loading="lazy"<?php endif; ?> alt="Page <?php echo $index + 1; ?>" decoding="async" data-page-index="<?php echo $index; ?>">
                     </div>
                 <?php endforeach; ?>
             <?php else: ?>
@@ -207,16 +157,16 @@
     </div>
     
     <!-- Navigation Arrows -->
-    <div class="nav-arrow nav-arrow-left" id="navArrowLeft">
+    <button type="button" class="nav-arrow nav-arrow-left" id="navArrowLeft" aria-label="Previous page">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M15 18l-6-6 6-6"/>
         </svg>
-    </div>
-    <div class="nav-arrow nav-arrow-right" id="navArrowRight">
+    </button>
+    <button type="button" class="nav-arrow nav-arrow-right" id="navArrowRight" aria-label="Next page">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M9 18l6-6-6-6"/>
         </svg>
-    </div>
+    </button>
     
     <!-- Page Indicator (hidden by default, shown only in paged mode) -->
     <div class="page-indicator" id="pageIndicator" style="display: none;">
@@ -238,6 +188,9 @@
                     </button>
                     <button class="settings-btn" data-setting="mode" data-value="longstrip">
                         <span class="btn-icon">📋</span> Long Strip
+                    </button>
+                    <button class="settings-btn" data-setting="mode" data-value="webtoon">
+                        <span class="btn-icon">📱</span> Webtoon
                     </button>
                 </div>
             </div>
@@ -546,12 +499,24 @@
     justify-content: space-between;
     align-items: center;
     z-index: 101;
-    transition: all 0.3s ease;
+    max-height: 80px;
+    overflow: hidden;
+    transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.2s ease, transform 0.3s ease;
+}
+
+.reader-top-bar.is-hidden {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    opacity: 0;
+    transform: translateY(-100%);
+    pointer-events: none;
 }
 
 .reader-nav-btn {
     display: flex;
     align-items: center;
+    min-height: 44px;
     gap: 6px;
     padding: 6px 12px;
     border-radius: 8px;
@@ -564,6 +529,8 @@
 .reader-fullscreen-btn {
     border: none;
     border-radius: 8px;
+    min-width: 44px;
+    min-height: 44px;
     padding: 8px;
     cursor: pointer;
     transition: all 0.2s;
@@ -579,6 +546,7 @@
     right: 0;
     height: 2px;
     z-index: 100;
+    transition: top 0.3s ease;
 }
 
 .reader-progress-fill {
@@ -586,6 +554,10 @@
     height: 100%;
     background: #0078d4;
     transition: width 0.3s;
+}
+
+.reader-top-bar.is-hidden + .reader-progress-bar {
+    top: 0;
 }
 
 .reader-main-content {
@@ -605,6 +577,8 @@
     justify-content: center;
     align-items: center;
     margin-bottom: 20px;
+    /* Reserve space for deferred images so the observer does not treat collapsed pages as visible. */
+    min-height: 70vh;
     cursor: pointer;
 }
 
@@ -616,10 +590,41 @@
     border-radius: 4px;
 }
 
+.reader-main-content.webtoon-content {
+    padding: 0;
+    overflow-x: auto;
+}
+
+.reader-viewer.webtoon-mode {
+    width: 100%;
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.reader-viewer.webtoon-mode .reader-page {
+    width: 100%;
+    margin: 0;
+    cursor: default;
+}
+
+.reader-viewer.webtoon-mode .reader-page img {
+    flex: 0 0 auto;
+    max-width: none;
+    max-height: none;
+    height: auto;
+    display: block;
+    margin: 0;
+    border-radius: 0;
+}
+
 /* Navigation Arrows - Hidden on mobile */
 .nav-arrow {
     position: fixed;
     top: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
     transform: translateY(-50%);
     backdrop-filter: blur(10px);
     border-radius: 50%;
@@ -642,12 +647,30 @@
     right: 20px;
 }
 
-/* Hide navigation arrows on mobile devices */
+/* Show page controls on mobile only when tap-to-advance is disabled. */
 @media (max-width: 768px) {
     .nav-arrow {
         display: none !important;
         opacity: 0 !important;
         visibility: hidden !important;
+    }
+
+    .manga-reader-container.show-page-arrows .nav-arrow {
+        display: flex !important;
+        opacity: 1 !important;
+        visibility: visible !important;
+        min-width: 48px;
+        min-height: 48px;
+        padding: 10px;
+        background: rgba(0, 0, 0, 0.8);
+    }
+
+    .manga-reader-container.show-page-arrows .nav-arrow-left {
+        left: 8px;
+    }
+
+    .manga-reader-container.show-page-arrows .nav-arrow-right {
+        right: 8px;
     }
 }
 
@@ -675,6 +698,8 @@
     z-index: 1000;
     transition: right 0.3s;
     overflow: hidden;
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
 }
 
 .reader-settings-panel.open {
@@ -711,6 +736,10 @@
 
 .settings-panel-content {
     padding: 20px;
+    max-height: calc(100vh - 88px);
+    max-height: calc(100dvh - 88px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .settings-section {
@@ -795,6 +824,11 @@
     .reader-top-bar {
         padding: 10px 16px;
     }
+
+    .reader-top-bar .chapter-nav {
+        flex-direction: row;
+        gap: 6px;
+    }
     
     .reader-nav-btn span {
         display: none;
@@ -811,7 +845,7 @@
     
     .reader-settings-panel.open {
         right: 10px;
-        width: 280px;
+        width: min(280px, calc(100vw - 20px));
     }
     
     .settings-btn {
@@ -820,7 +854,75 @@
     }
 }
 
+@media (max-height: 500px) and (orientation: landscape) {
+    .reader-settings-panel.open {
+        top: 8px;
+        right: 8px;
+        width: min(320px, calc(100vw - 16px));
+        max-height: calc(100vh - 16px);
+        max-height: calc(100dvh - 16px);
+        transform: none;
+    }
+
+    .settings-panel-content {
+        max-height: calc(100vh - 72px);
+        max-height: calc(100dvh - 72px);
+        padding: 12px 16px;
+    }
+
+    .settings-section {
+        margin-bottom: 12px;
+    }
+}
+
 @media (max-width: 480px) {
+    .reader-top-bar {
+        flex-wrap: wrap;
+        gap: 4px;
+        padding: 6px 8px;
+        max-height: 108px;
+    }
+
+    .reader-top-bar.is-hidden {
+        max-height: 0;
+    }
+
+    .reader-top-bar-left,
+    .reader-top-bar-right {
+        gap: 4px;
+    }
+
+    .reader-top-bar-center {
+        order: 3;
+        flex: 0 0 100%;
+        justify-content: center;
+        min-width: 0;
+    }
+
+    .chapter-nav {
+        gap: 4px;
+    }
+
+    .chapter-nav .reader-nav-btn {
+        font-size: 0;
+        gap: 0;
+        padding: 0 8px;
+    }
+
+    .chapter-selector {
+        min-width: 0;
+        width: min(180px, 52vw);
+        min-height: 44px;
+    }
+
+    .reader-progress-bar {
+        top: 106px;
+    }
+
+    .reader-top-bar.is-hidden + .reader-progress-bar {
+        top: 0;
+    }
+
     .settings-buttons-group {
         gap: 6px;
     }
@@ -840,6 +942,7 @@
 jQuery(document).ready(function($) {
     // DOM Elements
     const container = document.getElementById('mangaReaderContainer');
+    const readerTopBar = document.getElementById('readerTopBar');
     const pages = document.querySelectorAll('.reader-page');
     const totalPages = pages.length;
     const progressFill = document.getElementById('readerProgressFill');
@@ -858,6 +961,24 @@ jQuery(document).ready(function($) {
     const resetZoomBtn = document.getElementById('resetZoomBtn');
     const zoomLevelDisplay = document.getElementById('zoomLevelDisplay');
     const scrollContainer = document.getElementById('readerMainContent');
+    const deferredReaderImages = document.querySelectorAll('.reader-page img[data-src]');
+    if ('IntersectionObserver' in window) {
+        const readerImageObserver = new IntersectionObserver((entries, observer) => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting) return;
+                const image = entry.target;
+                image.src = image.dataset.src;
+                image.removeAttribute('data-src');
+                observer.unobserve(image);
+            });
+        }, { root: scrollContainer, rootMargin: '800px 0px', threshold: 0.01 });
+        deferredReaderImages.forEach(image => readerImageObserver.observe(image));
+    } else {
+        deferredReaderImages.forEach(image => {
+            image.src = image.dataset.src;
+            image.removeAttribute('data-src');
+        });
+    }
     
     // State
     let currentPage = 0;
@@ -868,10 +989,36 @@ jQuery(document).ready(function($) {
     let navMode = 'click';
     let currentBgMode = 'dark';
     let isScrolling = false;
+    let topBarManuallyVisible = false;
     
     // Check if mobile view
     function isMobile() {
         return window.innerWidth <= 768;
+    }
+
+    function isContinuousMode() {
+        return readingMode === 'longstrip' || readingMode === 'webtoon';
+    }
+
+    function updatePageArrowVisibility() {
+        container.classList.toggle('show-page-arrows', navMode === 'buttons' && !isContinuousMode());
+    }
+
+    function updateReaderTopBarVisibility() {
+        if (!readerTopBar || !scrollContainer) return;
+        let atStart = false;
+        let atEnd = false;
+
+        if (isContinuousMode()) {
+            const maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight;
+            atStart = scrollContainer.scrollTop <= 24;
+            atEnd = maxScroll > 24 && maxScroll - scrollContainer.scrollTop <= 24;
+        } else {
+            atStart = currentPage <= 0;
+            atEnd = totalPages > 0 && currentPage >= totalPages - 1;
+        }
+
+        readerTopBar.classList.toggle('is-hidden', !(atStart || atEnd || topBarManuallyVisible));
     }
     
     // Update total pages display
@@ -882,7 +1029,7 @@ jQuery(document).ready(function($) {
     // Show/hide page indicator based on reading mode
     function updatePageIndicatorVisibility() {
         if (pageIndicator) {
-            if (readingMode === 'paged') {
+            if (!isContinuousMode()) {
                 pageIndicator.style.display = 'block';
             } else {
                 pageIndicator.style.display = 'none';
@@ -915,6 +1062,11 @@ jQuery(document).ready(function($) {
         pages.forEach(page => {
             const img = page.querySelector('img');
             if (img) {
+                if (readingMode === 'webtoon') {
+                    img.style.objectFit = 'contain';
+                    img.style.height = 'auto';
+                    return;
+                }
                 if (imageFit === 'contain') {
                     img.style.objectFit = 'contain';
                     img.style.width = '100%';
@@ -952,8 +1104,16 @@ jQuery(document).ready(function($) {
         pages.forEach(page => {
             const img = page.querySelector('img');
             if (img) {
-                img.style.transform = `scale(${scaleValue})`;
-                img.style.transformOrigin = 'center';
+                if (readingMode === 'webtoon') {
+                    // Scale in layout so the image height grows with its width.
+                    // CSS transforms do not affect flow and leave gaps between pages.
+                    img.style.width = (scaleValue * 100) + '%';
+                    img.style.height = 'auto';
+                    img.style.transform = 'none';
+                } else {
+                    img.style.transform = `scale(${scaleValue})`;
+                    img.style.transformOrigin = 'center';
+                }
             }
         });
         
@@ -964,16 +1124,24 @@ jQuery(document).ready(function($) {
     
     // Update page display based on mode (PAGED MODE)
     function updatePageDisplay() {
-        if (readingMode === 'longstrip') {
+        updatePageArrowVisibility();
+        if (isContinuousMode()) {
+            const viewer = document.getElementById('readerViewer');
+            viewer.classList.toggle('webtoon-mode', readingMode === 'webtoon');
+            scrollContainer.classList.toggle('webtoon-content', readingMode === 'webtoon');
             pages.forEach(page => {
                 page.style.display = 'flex';
+                page.style.width = readingMode === 'webtoon' ? '100%' : '';
             });
             updateProgress();
             updatePageIndicatorVisibility();
         } else {
-            // Paged mode - only show current page
+            const viewer = document.getElementById('readerViewer');
+            viewer.classList.remove('webtoon-mode');
+            scrollContainer.classList.remove('webtoon-content');
             pages.forEach((page, index) => {
                 page.style.display = index === currentPage ? 'flex' : 'none';
+                page.style.width = '';
             });
             updateProgress();
             updatePageIndicator();
@@ -988,7 +1156,7 @@ jQuery(document).ready(function($) {
     
     // Update progress bar
     function updateProgress() {
-        if (readingMode === 'longstrip' && scrollContainer) {
+        if (isContinuousMode() && scrollContainer) {
             const scrollTop = scrollContainer.scrollTop;
             const scrollHeight = scrollContainer.scrollHeight - scrollContainer.clientHeight;
             if (scrollHeight > 0) {
@@ -999,6 +1167,7 @@ jQuery(document).ready(function($) {
             const progress = ((currentPage + 1) / totalPages) * 100;
             if (progressFill) progressFill.style.width = progress + '%';
         }
+        updateReaderTopBarVisibility();
     }
     
     // Update page indicator
@@ -1010,8 +1179,8 @@ jQuery(document).ready(function($) {
     
     // Navigate to next page (Paged mode only)
     function nextPage() {
-        if (readingMode === 'longstrip') return;
-        
+        if (isContinuousMode()) return;
+
         if (currentPage < totalPages - 1) {
             currentPage++;
             updatePageDisplay();
@@ -1020,8 +1189,8 @@ jQuery(document).ready(function($) {
     
     // Navigate to previous page (Paged mode only)
     function prevPage() {
-        if (readingMode === 'longstrip') return;
-        
+        if (isContinuousMode()) return;
+
         if (currentPage > 0) {
             currentPage--;
             updatePageDisplay();
@@ -1030,7 +1199,7 @@ jQuery(document).ready(function($) {
     
     // Track current page on scroll (Paged mode only)
     function trackCurrentPage() {
-        if (readingMode === 'longstrip') return;
+        if (readingMode !== 'paged') return;
         if (isScrolling) return;
         
         let closestPage = 0;
@@ -1050,12 +1219,13 @@ jQuery(document).ready(function($) {
             currentPage = closestPage;
             updateProgress();
             updatePageIndicator();
+            updateReaderTopBarVisibility();
         }
     }
     
     // LONG STRIP MODE: Navigate to next image when clicking
     function longStripNextImage(clickedPage) {
-        if (readingMode !== 'longstrip') return;
+        if (!isContinuousMode()) return;
         
         const allPages = Array.from(pages);
         const currentIndex = allPages.indexOf(clickedPage);
@@ -1069,24 +1239,9 @@ jQuery(document).ready(function($) {
     // Set reading mode
     function setReadingMode(mode) {
         readingMode = mode;
-        
-        if (mode === 'longstrip') {
-            pages.forEach(page => {
-                page.style.display = 'flex';
-            });
-            if (scrollContainer) {
-                scrollContainer.removeEventListener('scroll', trackCurrentPage);
-                scrollContainer.addEventListener('scroll', updateProgress);
-            }
-            updatePageIndicatorVisibility();
-        } else {
-            updatePageDisplay();
-            if (scrollContainer) {
-                scrollContainer.removeEventListener('scroll', updateProgress);
-                scrollContainer.addEventListener('scroll', trackCurrentPage);
-            }
-            updatePageIndicatorVisibility();
-        }
+        updatePageDisplay();
+        applyImageFit();
+        applyScale();
         
         localStorage.setItem('readerReadingMode', mode);
     }
@@ -1121,6 +1276,7 @@ jQuery(document).ready(function($) {
         }
         if (currentZoom < 2.5) {
             currentZoom += 0.25;
+            localStorage.setItem('readerZoomLevel', String(currentZoom));
             applyScale();
         }
     }
@@ -1137,12 +1293,14 @@ jQuery(document).ready(function($) {
         }
         if (currentZoom > 0.5) {
             currentZoom -= 0.25;
+            localStorage.setItem('readerZoomLevel', String(currentZoom));
             applyScale();
         }
     }
     
     function resetZoom() {
         currentZoom = 1;
+        localStorage.setItem('readerZoomLevel', '1');
         setScaleMode('auto');
         applyScale();
         document.querySelectorAll('[data-setting="scale"]').forEach(btn => {
@@ -1153,17 +1311,15 @@ jQuery(document).ready(function($) {
         });
     }
     
-    // Event Listeners - Only add if not on mobile
-    if (!isMobile()) {
-        if (prevArrow) prevArrow.addEventListener('click', prevPage);
-        if (nextArrow) nextArrow.addEventListener('click', nextPage);
-    }
+    // Bind once across viewport changes; CSS controls mobile visibility.
+    if (prevArrow) prevArrow.addEventListener('click', prevPage);
+    if (nextArrow) nextArrow.addEventListener('click', nextPage);
     
     // Keyboard navigation
     document.addEventListener('keydown', function(e) {
         if (isMobile()) return; // Disable keyboard navigation on mobile
         
-        if (readingMode !== 'longstrip') {
+        if (!isContinuousMode()) {
             if (e.key === 'ArrowLeft') {
                 prevPage();
                 e.preventDefault();
@@ -1237,21 +1393,18 @@ jQuery(document).ready(function($) {
         });
     }
     
-    // Zoom controls - Only add if not on mobile
-    if (!isMobile()) {
-        if (zoomInBtn) zoomInBtn.addEventListener('click', zoomIn);
-        if (zoomOutBtn) zoomOutBtn.addEventListener('click', zoomOut);
-        if (resetZoomBtn) resetZoomBtn.addEventListener('click', resetZoom);
-    }
+    if (zoomInBtn) zoomInBtn.addEventListener('click', zoomIn);
+    if (zoomOutBtn) zoomOutBtn.addEventListener('click', zoomOut);
+    if (resetZoomBtn) resetZoomBtn.addEventListener('click', resetZoom);
     
     // IMAGE CLICK HANDLING - Works for both modes
     pages.forEach(page => {
         page.addEventListener('click', function(e) {
-            // Only handle clicks when navMode is 'click'
-            if (navMode === 'click') {
+            // Only advance when the image itself is clicked.
+            if (navMode === 'click' && e.target.closest('img')) {
                 e.stopPropagation();
                 
-                if (readingMode === 'longstrip') {
+                if (isContinuousMode()) {
                     // Long strip mode: scroll to next image
                     const allPages = Array.from(pages);
                     const currentIdx = allPages.indexOf(this);
@@ -1262,31 +1415,37 @@ jQuery(document).ready(function($) {
                         });
                     }
                 } else {
-                    // Paged mode: go to next page
-                    if (currentPage < totalPages - 1) {
-                        currentPage++;
-                        updatePageDisplay();
-                    }
+                    nextPage();
                 }
             }
         });
     });
     
-    // Scroll tracking with debounce
+    // Toggle the top bar only from empty reader space, never from an image or control.
+    if (scrollContainer && readerTopBar) {
+        scrollContainer.addEventListener('click', function(e) {
+            if (e.target.closest('img, .reader-top-bar, .reader-settings-panel, .reader-zoom-controls, .nav-arrow, .page-indicator')) return;
+            topBarManuallyVisible = readerTopBar.classList.contains('is-hidden');
+            updateReaderTopBarVisibility();
+        });
+    }
+
+    // Coalesce scroll work to one progress/page update per animation frame.
     if (scrollContainer) {
         scrollContainer.addEventListener('scroll', function() {
-            if (readingMode === 'longstrip') {
-                updateProgress();
-            } else {
-                if (!isScrolling) {
-                    isScrolling = true;
-                    requestAnimationFrame(() => {
-                        trackCurrentPage();
-                        isScrolling = false;
-                    });
+            topBarManuallyVisible = false;
+            if (isScrolling) return;
+
+            isScrolling = true;
+            requestAnimationFrame(() => {
+                isScrolling = false;
+                if (isContinuousMode()) {
+                    updateProgress();
+                } else {
+                    trackCurrentPage();
                 }
-            }
-        });
+            });
+        }, { passive: true });
     }
     
     // Settings button handlers
@@ -1316,22 +1475,29 @@ jQuery(document).ready(function($) {
                 case 'nav':
                     navMode = value;
                     localStorage.setItem('readerNavMode', value);
+                    updatePageArrowVisibility();
                     break;
             }
         });
     });
     
     // Load saved settings
-    const savedReadingMode = localStorage.getItem('readerReadingMode');
+    const savedMode = localStorage.getItem('readerReadingMode');
+    const savedReadingMode = savedMode === 'comics' ? 'webtoon' : savedMode;
     const savedImageFit = localStorage.getItem('readerImageFit');
     const savedScaleMode = localStorage.getItem('readerScaleMode');
     const savedBgMode = localStorage.getItem('readerBgMode');
     const savedNavMode = localStorage.getItem('readerNavMode');
+    const savedZoomLevel = parseFloat(localStorage.getItem('readerZoomLevel'));
+
+    if (Number.isFinite(savedZoomLevel)) {
+        currentZoom = Math.min(2.5, Math.max(0.5, savedZoomLevel));
+    }
     
-    if (savedReadingMode && savedReadingMode !== 'paged') {
+    if (['paged', 'longstrip', 'webtoon'].includes(savedReadingMode)) {
         setReadingMode(savedReadingMode);
+        document.querySelectorAll('[data-setting="mode"]').forEach(btn => btn.classList.remove('active'));
         document.querySelector(`[data-setting="mode"][data-value="${savedReadingMode}"]`)?.classList.add('active');
-        document.querySelector(`[data-setting="mode"][data-value="paged"]`)?.classList.remove('active');
     }
     
     if (savedImageFit && savedImageFit !== 'contain') {
@@ -1369,51 +1535,17 @@ jQuery(document).ready(function($) {
         updatePageDisplay();
     }
     
-    // Handle window resize to adjust arrow visibility
+    // Recalculate responsive reader layout after orientation/viewport changes.
     window.addEventListener('resize', function() {
-        const mobile = isMobile();
-        if (mobile) {
-            // Remove event listeners if on mobile
-            if (prevArrow) {
-                prevArrow.removeEventListener('click', prevPage);
-            }
-            if (nextArrow) {
-                nextArrow.removeEventListener('click', nextPage);
-            }
-            if (zoomInBtn) {
-                zoomInBtn.removeEventListener('click', zoomIn);
-            }
-            if (zoomOutBtn) {
-                zoomOutBtn.removeEventListener('click', zoomOut);
-            }
-            if (resetZoomBtn) {
-                resetZoomBtn.removeEventListener('click', resetZoom);
-            }
-        } else {
-            // Re-add event listeners if not on mobile and not already added
-            if (prevArrow && !prevArrow.hasEventListener) {
-                prevArrow.addEventListener('click', prevPage);
-                prevArrow.hasEventListener = true;
-            }
-            if (nextArrow && !nextArrow.hasEventListener) {
-                nextArrow.addEventListener('click', nextPage);
-                nextArrow.hasEventListener = true;
-            }
-            if (zoomInBtn && !zoomInBtn.hasEventListener) {
-                zoomInBtn.addEventListener('click', zoomIn);
-                zoomInBtn.hasEventListener = true;
-            }
-            if (zoomOutBtn && !zoomOutBtn.hasEventListener) {
-                zoomOutBtn.addEventListener('click', zoomOut);
-                zoomOutBtn.hasEventListener = true;
-            }
-            if (resetZoomBtn && !resetZoomBtn.hasEventListener) {
-                resetZoomBtn.addEventListener('click', resetZoom);
-                resetZoomBtn.hasEventListener = true;
-            }
+        if (readingMode === 'webtoon') {
+            updatePageDisplay();
         }
+        updateReaderTopBarVisibility();
     });
     
+    // Set initial navigation visibility at the start of the chapter.
+    updateReaderTopBarVisibility();
+
     // Hide body overflow
     document.body.style.overflow = 'hidden';
 });
