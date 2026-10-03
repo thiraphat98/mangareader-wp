@@ -802,7 +802,7 @@ function manga_resolve_source_folder($submitted_path, $allow_chapter = false) {
 }
 
 function manga_supported_image_files($folder) {
-    $allowed_extensions = array('jpg', 'jpeg', 'png', 'gif', 'webp');
+    $allowed_extensions = array('jpg', 'jpeg', 'png', 'gif', 'webp', 'avif');
     $files = array();
     foreach ((array) scandir($folder) as $name) {
         $path = trailingslashit($folder) . $name;
@@ -886,7 +886,9 @@ function manga_get_chapter_image_urls($chapter_id) {
                     $direct_urls = array();
                     break;
                 }
-                $direct_urls[] = $image_url;
+                clearstatcache(true, $source_file);
+                $mtime = filemtime($source_file);
+                $direct_urls[] = $mtime === false ? $image_url : add_query_arg('v', (string) $mtime, $image_url);
             }
             if ($direct_urls) {
                 return $direct_urls;
@@ -1145,7 +1147,7 @@ function manga_set_cover_from_folder($manga_id, $series_path) {
         return true;
     }
 
-    foreach (array('cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp') as $cover_name) {
+    foreach (array('cover.avif', 'cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp') as $cover_name) {
         $cover_path = trailingslashit($series_path) . $cover_name;
         if (!is_file($cover_path)) {
             continue;
@@ -2224,6 +2226,17 @@ function output_manga_grid_custom($manga_list) {
     echo '</div>';
 }
 
+// Keep the selected letter when switching between archive sort modes.
+function manga_filter_posts_by_letter($posts, $letter) {
+    if (!$letter || $letter === 'all') {
+        return $posts;
+    }
+
+    return array_values(array_filter($posts, function($manga) use ($letter) {
+        return strtoupper(substr(get_the_title($manga->ID), 0, 1)) === strtoupper($letter);
+    }));
+}
+
 // AJAX Filter for Manga Archive
 function ajax_filter_manga() {
     check_ajax_referer('manga_filter_nonce', 'nonce');
@@ -2244,7 +2257,7 @@ function ajax_filter_manga() {
             $args['order'] = 'ASC';
             break;
         case 'updated':
-            $all_manga = get_posts($args);
+            $all_manga = manga_filter_posts_by_letter(get_posts($args), $letter);
             usort($all_manga, function($a, $b) {
                 $latest_chapter_a = get_latest_chapter_date($a->ID);
                 $latest_chapter_b = get_latest_chapter_date($b->ID);
@@ -2254,7 +2267,7 @@ function ajax_filter_manga() {
             wp_die();
             break;
         case 'popular':
-            $all_manga = get_posts($args);
+            $all_manga = manga_filter_posts_by_letter(get_posts($args), $letter);
             usort($all_manga, function($a, $b) {
                 $chapters_a = count(get_posts(array(
                     'post_type' => 'chapter',
@@ -2279,18 +2292,8 @@ function ajax_filter_manga() {
             break;
     }
     
-    // Handle letter filtering - ONLY for alphabetical sort
-    if ($sort_by === 'alphabetical' && $letter && $letter !== 'all') {
-        $all_manga = get_posts($args);
-        $filtered_manga = array();
-        foreach ($all_manga as $manga) {
-            $title = get_the_title($manga->ID);
-            $first_letter = strtoupper(substr($title, 0, 1));
-            if ($first_letter === strtoupper($letter)) {
-                $filtered_manga[] = $manga;
-            }
-        }
-        output_manga_grid_custom($filtered_manga);
+    if ($letter && $letter !== 'all') {
+        output_manga_grid_custom(manga_filter_posts_by_letter(get_posts($args), $letter));
         wp_die();
     } else {
         $query = new WP_Query($args);
