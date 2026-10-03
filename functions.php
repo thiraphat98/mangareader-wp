@@ -2131,6 +2131,55 @@ function get_latest_chapter_date($manga_id) {
     return get_the_date('Y-m-d H:i:s', $manga_id);
 }
 
+// Fetch chapters for a whole grid with one query instead of one query per manga.
+function manga_chapters_by_manga_ids($manga_ids) {
+    $manga_ids = array_values(array_unique(array_filter(array_map('absint', (array) $manga_ids))));
+    if (!$manga_ids) {
+        return array();
+    }
+
+    $grouped = array_fill_keys($manga_ids, array());
+    $chapters = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => 'publish',
+        'posts_per_page' => -1,
+        'orderby' => 'date',
+        'order' => 'DESC',
+        'meta_query' => array(array(
+            'key' => 'connected_manga_id',
+            'value' => $manga_ids,
+            'compare' => 'IN',
+        )),
+    ));
+    foreach ($chapters as $chapter) {
+        $manga_id = (int) get_post_meta($chapter->ID, 'connected_manga_id', true);
+        if (isset($grouped[$manga_id])) {
+            $grouped[$manga_id][] = $chapter;
+        }
+    }
+    return $grouped;
+}
+
+// Sort by volume and chapter once per post; the same ordering is used in grids and chapter lists.
+function manga_sort_chapter_posts($chapters) {
+    $sort_values = array();
+    foreach ($chapters as $chapter) {
+        $sort_values[$chapter->ID] = manga_chapter_numbers_for_post($chapter->ID);
+    }
+    usort($chapters, function($a, $b) use ($sort_values) {
+        $numbers_a = $sort_values[$a->ID];
+        $numbers_b = $sort_values[$b->ID];
+        if ($numbers_a['volume'] != $numbers_b['volume']) {
+            return $numbers_b['volume'] <=> $numbers_a['volume'];
+        }
+        if ($numbers_a['chapter'] != $numbers_b['chapter']) {
+            return $numbers_b['chapter'] <=> $numbers_a['chapter'];
+        }
+        return $b->ID <=> $a->ID;
+    });
+    return $chapters;
+}
+
 // Helper function to get sorted chapters for a manga (with volume support)
 function get_sorted_chapters_for_manga($manga_id) {
     $chapters = get_posts(array(
@@ -2140,30 +2189,7 @@ function get_sorted_chapters_for_manga($manga_id) {
         'meta_value' => $manga_id,
         'post_status' => 'publish'
     ));
-    
-    // Sort by volume number first, then chapter number
-    usort($chapters, function($a, $b) {
-        $info_a = manga_parse_chapter_title(get_the_title($a->ID));
-        $info_b = manga_parse_chapter_title(get_the_title($b->ID));
-        $vol_a = (float) get_post_meta($a->ID, 'volume_number', true);
-        $vol_b = (float) get_post_meta($b->ID, 'volume_number', true);
-        $chap_a = (float) get_post_meta($a->ID, 'chapter_number', true);
-        $chap_b = (float) get_post_meta($b->ID, 'chapter_number', true);
-        $vol_a = $vol_a > 0 ? $vol_a : $info_a['volume'];
-        $vol_b = $vol_b > 0 ? $vol_b : $info_b['volume'];
-        $chap_a = $chap_a > 0 ? $chap_a : $info_a['chapter'];
-        $chap_b = $chap_b > 0 ? $chap_b : $info_b['chapter'];
-        
-        if ($vol_a != $vol_b) {
-            return $vol_b - $vol_a; // Higher volume first
-        }
-        if ($chap_a != $chap_b) {
-            return $chap_b <=> $chap_a; // Higher chapter first within same volume
-        }
-        return $b->ID <=> $a->ID;
-    });
-    
-    return $chapters;
+    return manga_sort_chapter_posts($chapters);
 }
 
 // Helper function to output manga grid for custom sorted arrays
@@ -2173,6 +2199,7 @@ function output_manga_grid_custom($manga_list) {
         return;
     }
     
+    $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_list, 'ID'));
     echo '<div class="manga-grid">';
     foreach ($manga_list as $manga) {
         $manga_id = $manga->ID;
@@ -2180,7 +2207,7 @@ function output_manga_grid_custom($manga_list) {
         $manga_cover = manga_get_cover_url($manga_id, 'manga-cover-small');
         
         // Get sorted recent chapters
-        $all_chapters = get_sorted_chapters_for_manga($manga_id);
+        $all_chapters = manga_sort_chapter_posts($chapter_groups[$manga_id] ?? array());
         $recent_chapters = array_slice($all_chapters, 0, 3);
         ?>
         <div class="manga-item">
@@ -2394,12 +2421,15 @@ add_action('wp_ajax_filter_manga_by_genre', 'ajax_filter_manga_by_genre');
 add_action('wp_ajax_nopriv_filter_manga_by_genre', 'ajax_filter_manga_by_genre');
 
 // Helper Functions
-function output_manga_grid($manga_list) {
+function output_manga_grid($manga_list, $chapter_groups = null) {
     if (empty($manga_list)) {
         echo '<p class="no-results">No manga found.</p>';
         return;
     }
     
+    if ($chapter_groups === null) {
+        $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_list, 'ID'));
+    }
     echo '<div class="manga-grid">';
     foreach ($manga_list as $manga) {
         $manga_id = $manga->ID;
@@ -2407,7 +2437,7 @@ function output_manga_grid($manga_list) {
         $manga_cover = manga_get_cover_url($manga_id, 'manga-cover-small');
         
         // Get sorted recent chapters
-        $all_chapters = get_sorted_chapters_for_manga($manga_id);
+        $all_chapters = manga_sort_chapter_posts($chapter_groups[$manga_id] ?? array());
         $recent_chapters = array_slice($all_chapters, 0, 3);
         ?>
         <div class="manga-item">
