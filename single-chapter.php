@@ -600,6 +600,11 @@
     padding: 20px;
 }
 
+.reader-main-content.landscape-pan {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+}
+
 .reader-viewer {
     max-width: 1000px;
     margin: 0 auto;
@@ -623,9 +628,26 @@
     border-radius: 4px;
 }
 
+.reader-main-content.continuous-mode .reader-page.is-landscape {
+    position: relative;
+    left: 50%;
+    width: calc(100vw - 40px);
+    max-width: none;
+    transform: translateX(-50%);
+}
+
+.reader-page.is-landscape img {
+    flex: none;
+    max-width: none;
+}
+
 .reader-main-content.webtoon-content {
     padding: 0;
     overflow-x: auto;
+}
+
+.reader-main-content.webtoon-content .reader-page.is-landscape {
+    width: 100vw;
 }
 
 .reader-viewer.webtoon-mode {
@@ -818,6 +840,33 @@
     .reader-zoom-controls {
         display: none !important;
         visibility: hidden !important;
+    }
+
+    .manga-reader-container.has-landscape-page .reader-zoom-controls {
+        display: flex !important;
+        visibility: visible !important;
+        right: 8px;
+        bottom: 8px;
+        gap: 4px;
+        padding: 4px;
+    }
+
+    .manga-reader-container.has-landscape-page .zoom-btn {
+        min-width: 36px;
+        min-height: 36px;
+        padding: 6px;
+    }
+
+    .manga-reader-container.has-landscape-page .zoom-level {
+        padding: 0 4px;
+    }
+}
+
+@media (max-width: 480px) {
+    .manga-reader-container.has-landscape-page .page-indicator {
+        left: 8px;
+        bottom: 12px;
+        transform: none;
     }
 }
 
@@ -1035,6 +1084,19 @@ jQuery(document).ready(function($) {
     let currentBgMode = 'dark';
     let isScrolling = false;
     let topBarManuallyVisible = false;
+    let activeLandscapePage = -1;
+
+    pages.forEach((page, index) => {
+        const image = page.querySelector('img');
+        if (!image) return;
+        const updateOrientation = () => {
+            if (!image.naturalWidth || !image.naturalHeight) return;
+            page.classList.toggle('is-landscape', image.naturalWidth > image.naturalHeight);
+            if (index === currentPage) applyScale();
+        };
+        image.addEventListener('load', updateOrientation);
+        if (image.complete && image.naturalWidth) updateOrientation();
+    });
     
     // Check if mobile view
     function isMobile() {
@@ -1128,6 +1190,45 @@ jQuery(document).ready(function($) {
             }
         });
     }
+
+    // Wide spreads use real layout width, so the reader can pan instead of clipping a transform.
+    function updateLandscapeLayout() {
+        const viewer = document.getElementById('readerViewer');
+        const page = pages[currentPage];
+        const image = page?.querySelector('img');
+        const isLandscapePage = readingMode === 'paged' && page?.classList.contains('is-landscape') && image?.naturalWidth;
+
+        container.classList.toggle('has-landscape-page', Boolean(isLandscapePage));
+        scrollContainer.classList.toggle('landscape-pan', Boolean(isLandscapePage));
+        viewer.classList.toggle('landscape-page-active', Boolean(isLandscapePage));
+        if (!isLandscapePage) {
+            viewer.style.width = '';
+            viewer.style.maxWidth = '';
+            scrollContainer.scrollLeft = 0;
+            activeLandscapePage = -1;
+            return;
+        }
+
+        const previousRange = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+        const position = activeLandscapePage === currentPage && previousRange > 0
+            ? scrollContainer.scrollLeft / previousRange : 0.5;
+        const styles = getComputedStyle(scrollContainer);
+        const availableWidth = Math.max(1, scrollContainer.clientWidth - parseFloat(styles.paddingLeft) - parseFloat(styles.paddingRight));
+        const autoSpreadScale = window.innerWidth <= 480 ? 1.6 : window.innerWidth <= 768 ? 1.3 : 1;
+        const fitWidth = scaleMode === 'width' ? availableWidth : Math.min(image.naturalWidth, availableWidth * autoSpreadScale);
+        const baseWidth = scaleMode === 'width' ? availableWidth : imageFit === 'original' ? image.naturalWidth : fitWidth;
+        const zoom = scaleMode === 'auto' ? currentZoom : 1;
+
+        viewer.style.width = Math.round(baseWidth * zoom) + 'px';
+        viewer.style.maxWidth = 'none';
+        image.style.width = '100%';
+        image.style.maxWidth = 'none';
+        image.style.height = 'auto';
+        image.style.transform = 'none';
+        activeLandscapePage = currentPage;
+        const nextRange = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+        scrollContainer.scrollLeft = nextRange * position;
+    }
     
     // Apply scale/zoom
     function applyScale() {
@@ -1141,6 +1242,7 @@ jQuery(document).ready(function($) {
                 }
             });
             if (zoomLevelDisplay) zoomLevelDisplay.textContent = 'Fit Width';
+            updateLandscapeLayout();
             return;
         }
         
@@ -1165,6 +1267,7 @@ jQuery(document).ready(function($) {
         if (zoomLevelDisplay && scaleMode !== 'width') {
             zoomLevelDisplay.textContent = Math.round(scaleValue * 100) + '%';
         }
+        updateLandscapeLayout();
     }
     
     // Update page display based on mode (PAGED MODE)
@@ -1174,9 +1277,10 @@ jQuery(document).ready(function($) {
             const viewer = document.getElementById('readerViewer');
             viewer.classList.toggle('webtoon-mode', readingMode === 'webtoon');
             scrollContainer.classList.toggle('webtoon-content', readingMode === 'webtoon');
+            scrollContainer.classList.add('continuous-mode');
             pages.forEach(page => {
                 page.style.display = 'flex';
-                page.style.width = readingMode === 'webtoon' ? '100%' : '';
+                page.style.width = '';
             });
             updateProgress();
             updatePageIndicatorVisibility();
@@ -1184,6 +1288,7 @@ jQuery(document).ready(function($) {
             const viewer = document.getElementById('readerViewer');
             viewer.classList.remove('webtoon-mode');
             scrollContainer.classList.remove('webtoon-content');
+            scrollContainer.classList.remove('continuous-mode');
             pages.forEach((page, index) => {
                 page.style.display = index === currentPage ? 'flex' : 'none';
                 page.style.width = '';
@@ -1197,6 +1302,7 @@ jQuery(document).ready(function($) {
                 pages[currentPage].scrollIntoView({ behavior: 'instant', block: 'start' });
             }
         }
+        applyScale();
     }
     
     // Update progress bar
@@ -1295,6 +1401,7 @@ jQuery(document).ready(function($) {
     function setImageFitMode(fit) {
         imageFit = fit;
         applyImageFit();
+        applyScale();
         localStorage.setItem('readerImageFit', fit);
     }
     
@@ -1584,6 +1691,8 @@ jQuery(document).ready(function($) {
     window.addEventListener('resize', function() {
         if (readingMode === 'webtoon') {
             updatePageDisplay();
+        } else {
+            applyScale();
         }
         updateReaderTopBarVisibility();
     });
