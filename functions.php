@@ -2455,7 +2455,7 @@ function output_manga_grid($manga_list) {
 
 // Enqueue Scripts
 function manga_theme_scripts() {
-    wp_enqueue_style('manga-theme-style', get_stylesheet_uri(), array(), '6.2');
+    wp_enqueue_style('manga-theme-style', get_stylesheet_uri(), array(), (string) filemtime(get_stylesheet_directory() . '/style.css'));
     wp_enqueue_script('jquery');
 }
 add_action('wp_enqueue_scripts', 'manga_theme_scripts');
