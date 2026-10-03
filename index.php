@@ -4,15 +4,13 @@ get_header();
 $popular_manga = get_posts(array(
     'post_type' => 'manga',
     'posts_per_page' => 5,
-    'orderby' => 'comment_count',
-    'order' => 'DESC',
+    'orderby' => array('comment_count' => 'DESC', 'date' => 'DESC', 'ID' => 'DESC'),
 ));
 if (empty($popular_manga)) {
     $popular_manga = get_posts(array(
         'post_type' => 'manga',
         'posts_per_page' => 5,
-        'orderby' => 'date',
-        'order' => 'DESC',
+        'orderby' => array('date' => 'DESC', 'ID' => 'DESC'),
     ));
 }
 
