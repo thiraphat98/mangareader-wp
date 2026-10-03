@@ -634,11 +634,16 @@
     width: calc(100vw - 40px);
     max-width: none;
     transform: translateX(-50%);
+    justify-content: flex-start;
 }
 
-.reader-page.is-landscape img {
+.reader-main-content.continuous-mode .reader-page.is-landscape img {
     flex: none;
     max-width: none;
+}
+
+.reader-main-content.continuous-mode {
+    overflow-x: auto;
 }
 
 .reader-main-content.webtoon-content {
@@ -1092,7 +1097,7 @@ jQuery(document).ready(function($) {
         const updateOrientation = () => {
             if (!image.naturalWidth || !image.naturalHeight) return;
             page.classList.toggle('is-landscape', image.naturalWidth > image.naturalHeight);
-            if (index === currentPage) applyScale();
+            if (index === currentPage || isContinuousMode()) applyScale();
         };
         image.addEventListener('load', updateOrientation);
         if (image.complete && image.naturalWidth) updateOrientation();
@@ -1191,20 +1196,36 @@ jQuery(document).ready(function($) {
         });
     }
 
+    function updateLandscapeControls() {
+        let visibleLandscape = false;
+        if (isContinuousMode()) {
+            const viewport = scrollContainer.getBoundingClientRect();
+            visibleLandscape = Array.from(pages).some(page => {
+                if (!page.classList.contains('is-landscape')) return false;
+                const bounds = page.getBoundingClientRect();
+                return bounds.bottom > viewport.top && bounds.top < viewport.bottom;
+            });
+        } else {
+            visibleLandscape = pages[currentPage]?.classList.contains('is-landscape') || false;
+        }
+        container.classList.toggle('has-landscape-page', visibleLandscape);
+    }
+
     // Wide spreads use real layout width, so the reader can pan instead of clipping a transform.
     function updateLandscapeLayout() {
         const viewer = document.getElementById('readerViewer');
         const page = pages[currentPage];
         const image = page?.querySelector('img');
         const isLandscapePage = readingMode === 'paged' && page?.classList.contains('is-landscape') && image?.naturalWidth;
+        const wasPagedLandscape = viewer.classList.contains('landscape-page-active');
 
-        container.classList.toggle('has-landscape-page', Boolean(isLandscapePage));
+        updateLandscapeControls();
         scrollContainer.classList.toggle('landscape-pan', Boolean(isLandscapePage));
         viewer.classList.toggle('landscape-page-active', Boolean(isLandscapePage));
         if (!isLandscapePage) {
             viewer.style.width = '';
             viewer.style.maxWidth = '';
-            scrollContainer.scrollLeft = 0;
+            if (readingMode === 'paged' || wasPagedLandscape) scrollContainer.scrollLeft = 0;
             activeLandscapePage = -1;
             return;
         }
@@ -1214,8 +1235,12 @@ jQuery(document).ready(function($) {
             ? scrollContainer.scrollLeft / previousRange : 0.5;
         const styles = getComputedStyle(scrollContainer);
         const availableWidth = Math.max(1, scrollContainer.clientWidth - parseFloat(styles.paddingLeft) - parseFloat(styles.paddingRight));
-        const autoSpreadScale = window.innerWidth <= 480 ? 1.6 : window.innerWidth <= 768 ? 1.3 : 1;
-        const fitWidth = scaleMode === 'width' ? availableWidth : Math.min(image.naturalWidth, availableWidth * autoSpreadScale);
+        const availableHeight = Math.max(1, scrollContainer.clientHeight - parseFloat(styles.paddingTop) - parseFloat(styles.paddingBottom));
+        const aspectRatio = image.naturalWidth / image.naturalHeight;
+        const minimumScale = window.innerWidth <= 480 ? 1.5 : window.innerWidth <= 768 ? 1.25 : 1;
+        // Give a spread readable height on narrow screens, while limiting initial pan and avoiding upscaling beyond the source.
+        const readingWidth = Math.max(availableWidth * minimumScale, availableHeight * 0.55 * aspectRatio);
+        const fitWidth = Math.min(image.naturalWidth, availableWidth * 4, readingWidth);
         const baseWidth = scaleMode === 'width' ? availableWidth : imageFit === 'original' ? image.naturalWidth : fitWidth;
         const zoom = scaleMode === 'auto' ? currentZoom : 1;
 
@@ -1251,7 +1276,7 @@ jQuery(document).ready(function($) {
         pages.forEach(page => {
             const img = page.querySelector('img');
             if (img) {
-                if (readingMode === 'webtoon') {
+                if (readingMode === 'webtoon' || (readingMode === 'longstrip' && page.classList.contains('is-landscape'))) {
                     // Scale in layout so the image height grows with its width.
                     // CSS transforms do not affect flow and leave gaps between pages.
                     img.style.width = (scaleValue * 100) + '%';
@@ -1348,32 +1373,6 @@ jQuery(document).ready(function($) {
         }
     }
     
-    // Track current page on scroll (Paged mode only)
-    function trackCurrentPage() {
-        if (readingMode !== 'paged') return;
-        if (isScrolling) return;
-        
-        let closestPage = 0;
-        let closestDistance = Infinity;
-        
-        pages.forEach((page, index) => {
-            const rect = page.getBoundingClientRect();
-            const containerRect = scrollContainer.getBoundingClientRect();
-            const distance = Math.abs(rect.top - containerRect.top);
-            if (distance < closestDistance) {
-                closestDistance = distance;
-                closestPage = index;
-            }
-        });
-        
-        if (closestPage !== currentPage) {
-            currentPage = closestPage;
-            updateProgress();
-            updatePageIndicator();
-            updateReaderTopBarVisibility();
-        }
-    }
-    
     // LONG STRIP MODE: Navigate to next image when clicking
     function longStripNextImage(clickedPage) {
         if (!isContinuousMode()) return;
@@ -1400,6 +1399,7 @@ jQuery(document).ready(function($) {
     // Set image fit
     function setImageFitMode(fit) {
         imageFit = fit;
+        activeLandscapePage = -1;
         applyImageFit();
         applyScale();
         localStorage.setItem('readerImageFit', fit);
@@ -1593,8 +1593,10 @@ jQuery(document).ready(function($) {
                 isScrolling = false;
                 if (isContinuousMode()) {
                     updateProgress();
+                    updateLandscapeControls();
                 } else {
-                    trackCurrentPage();
+                    // A paged reader has one visible page; scrolling within a wide image must not change it.
+                    updateReaderTopBarVisibility();
                 }
             });
         }, { passive: true });
@@ -1696,6 +1698,14 @@ jQuery(document).ready(function($) {
         }
         updateReaderTopBarVisibility();
     });
+
+    // The top bar also changes the reader height without a window resize.
+    if ('ResizeObserver' in window) {
+        const readerSizeObserver = new ResizeObserver(() => {
+            if (readingMode === 'paged') applyScale();
+        });
+        readerSizeObserver.observe(scrollContainer);
+    }
     
     // Set initial navigation visibility at the start of the chapter.
     updateReaderTopBarVisibility();
