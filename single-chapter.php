@@ -149,8 +149,10 @@
                 <?php endforeach; ?>
             <?php else: ?>
                 <div class="no-images-message">
-                    <p>No images found for this chapter.</p>
-                    <a href="<?php echo admin_url('post.php?post=' . get_the_ID() . '&action=edit'); ?>" class="btn-primary" style="display: inline-block; padding: 10px 20px; background: #0078d4; color: white; border-radius: 6px; text-decoration: none;">Edit Chapter</a>
+                    <p>This chapter's images are temporarily unavailable. The chapter has been kept; please try again later.</p>
+                    <?php if (current_user_can('edit_post', get_the_ID())): ?>
+                        <a href="<?php echo esc_url(get_edit_post_link(get_the_ID())); ?>" class="btn-primary" style="display: inline-block; padding: 10px 20px; background: #0078d4; color: white; border-radius: 6px; text-decoration: none;">Review Chapter</a>
+                    <?php endif; ?>
                 </div>
             <?php endif; ?>
         </div>
