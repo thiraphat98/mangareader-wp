@@ -590,6 +590,24 @@
     border-radius: 4px;
 }
 
+/* Keep loaded continuous pages in document flow at the image's rendered height. */
+.reader-main-content.continuous-mode .reader-page.has-loaded-image {
+    min-height: 0;
+}
+
+.reader-main-content.continuous-mode .reader-page {
+    justify-content: flex-start;
+}
+
+.reader-main-content.continuous-mode .reader-page img {
+    flex: none;
+    max-width: none;
+}
+
+.reader-main-content.longstrip-content .reader-page {
+    margin-bottom: 0;
+}
+
 .reader-main-content.webtoon-content {
     padding: 0;
     overflow-x: auto;
@@ -990,6 +1008,18 @@ jQuery(document).ready(function($) {
     let currentBgMode = 'dark';
     let isScrolling = false;
     let topBarManuallyVisible = false;
+
+    pages.forEach(page => {
+        const image = page.querySelector('img');
+        if (!image) return;
+        const markLoaded = () => {
+            if (!image.naturalWidth || !image.naturalHeight) return;
+            page.classList.add('has-loaded-image');
+            if (isContinuousMode()) applyScale();
+        };
+        image.addEventListener('load', markLoaded);
+        if (image.complete && image.naturalWidth) markLoaded();
+    });
     
     // Check if mobile view
     function isMobile() {
@@ -1104,10 +1134,11 @@ jQuery(document).ready(function($) {
         pages.forEach(page => {
             const img = page.querySelector('img');
             if (img) {
-                if (readingMode === 'webtoon') {
-                    // Scale in layout so the image height grows with its width.
-                    // CSS transforms do not affect flow and leave gaps between pages.
-                    img.style.width = (scaleValue * 100) + '%';
+                if (isContinuousMode()) {
+                    // Transforms leave gaps when shrinking and overlap the next page when enlarging.
+                    img.style.width = readingMode === 'longstrip' && imageFit === 'original' && img.naturalWidth
+                        ? Math.round(img.naturalWidth * scaleValue) + 'px'
+                        : (scaleValue * 100) + '%';
                     img.style.height = 'auto';
                     img.style.transform = 'none';
                 } else {
@@ -1129,6 +1160,8 @@ jQuery(document).ready(function($) {
             const viewer = document.getElementById('readerViewer');
             viewer.classList.toggle('webtoon-mode', readingMode === 'webtoon');
             scrollContainer.classList.toggle('webtoon-content', readingMode === 'webtoon');
+            scrollContainer.classList.toggle('longstrip-content', readingMode === 'longstrip');
+            scrollContainer.classList.add('continuous-mode');
             pages.forEach(page => {
                 page.style.display = 'flex';
                 page.style.width = readingMode === 'webtoon' ? '100%' : '';
@@ -1139,6 +1172,8 @@ jQuery(document).ready(function($) {
             const viewer = document.getElementById('readerViewer');
             viewer.classList.remove('webtoon-mode');
             scrollContainer.classList.remove('webtoon-content');
+            scrollContainer.classList.remove('longstrip-content');
+            scrollContainer.classList.remove('continuous-mode');
             pages.forEach((page, index) => {
                 page.style.display = index === currentPage ? 'flex' : 'none';
                 page.style.width = '';
@@ -1250,6 +1285,7 @@ jQuery(document).ready(function($) {
     function setImageFitMode(fit) {
         imageFit = fit;
         applyImageFit();
+        applyScale();
         localStorage.setItem('readerImageFit', fit);
     }
     
