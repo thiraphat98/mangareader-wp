@@ -29,6 +29,9 @@ const names = [
   'manga_get_chapter_image_urls', 'manga_set_cover_from_folder',
   'manga_new_source_stable', 'manga_audit_imported_sources',
   'manga_source_exclusion_key', 'manga_remember_deleted_import',
+  'manga_sync_imported_chapter_images', 'manga_relink_renamed_chapter',
+  'manga_normalize_chapter_text', 'manga_parse_chapter_title',
+  'manga_chapter_numbers_for_post',
 ];
 const functions = names.map((name) => {
   const node = ast.children.find((item) => item.kind === 'function' && item.name.name === name);
@@ -44,10 +47,11 @@ function absint($value) { return abs((int) $value); }
 function trailingslashit($value) { return rtrim($value, '/') . '/'; }
 function wp_normalize_path($value) { return str_replace('\\\\', '/', $value); }
 function wp_json_encode($value) { return json_encode($value); }
+function wp_parse_url($value, $part) { return parse_url($value, $part); }
 function get_manga_base_url() { return 'https://example.test/manga/'; }
 function manga_public_url($value) { return $value; }
 function add_query_arg($key, $value, $url) { return $url . '?'. $key . '=' . $value; }
-function manga_source_file_url($value) { return get_manga_base_url() . basename($value); }
+function manga_source_file_url($value) { return get_manga_base_url() . ltrim(substr($value, strlen('/test/')), '/'); }
 function manga_resolve_source_folder($value, $chapter) { return is_dir($value) ? array('path' => $value) : new WP_Error('missing', 'missing'); }
 $meta = array(); $transients = array(); $options = array(); $posts = array();
 function get_post_meta($id, $key, $single = true) { global $meta; return $meta[$id][$key] ?? ''; }
@@ -55,12 +59,18 @@ function update_post_meta($id, $key, $value) { global $meta; $meta[$id][$key] = 
 function delete_post_meta($id, $key) { global $meta; unset($meta[$id][$key]); }
 function get_transient($key) { global $transients; return $transients[$key] ?? false; }
 function set_transient($key, $value, $expiry) { global $transients; $transients[$key] = $value; }
+function delete_transient($key) { global $transients; unset($transients[$key]); }
 function get_option($key, $default = false) { global $options; return $options[$key] ?? $default; }
 function update_option($key, $value, $autoload = false) { global $options; $options[$key] = $value; }
-function get_posts($args) { return array(1); }
+function get_posts($args) { global $queryCandidates; return $queryCandidates ?? array(1); }
 function get_post($id) { global $posts; return $posts[$id] ?? null; }
+function get_post_status($id) { return 'publish'; }
+function get_the_title($id) { return 'Series - Ch 1'; }
+function current_time($type) { return '2026-10-04 00:00:00'; }
+function mark_chapter_as_imported($path) {}
 ${functions}
 mkdir('/test/series/chapter', 0777, true);
+$thai_number = manga_parse_chapter_title('ตอนที่1');
 update_post_meta(1, 'imported_from_path', '/test/series/chapter');
 update_post_meta(1, 'image_links', "https://example.test/manga/01.jpg\\nhttps://example.test/manga/02.jpg");
 file_put_contents('/test/series/chapter/01.jpg', 'one');
@@ -89,9 +99,26 @@ $transients[$key]['first_seen'] -= 301;
 $stable_after_wait = manga_new_source_stable('/test/series', '', $files);
 $audit_missing = manga_audit_imported_sources();
 $warning_count = get_post_meta(1, '_manga_source_missing_checks');
+$warning_type_empty = get_post_meta(1, '_manga_source_health');
 file_put_contents('/test/series/chapter/01.jpg', 'restored');
 $audit_restored = manga_audit_imported_sources();
 $warning_cleared = get_post_meta(1, '_manga_source_health');
+unlink('/test/series/chapter/01.jpg'); rmdir('/test/series/chapter');
+mkdir('/test/series/ตอนที่1'); file_put_contents('/test/series/ตอนที่1/page01.png', 'renamed');
+$audit_renamed = manga_audit_imported_sources();
+$warning_type_renamed = get_post_meta(1, '_manga_source_health');
+update_post_meta(1, 'image_links', 'https://example.test/manga/series/chapter/page01.png');
+$relink_ambiguous = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1, 2));
+$saved_relink_links = get_post_meta(1, 'image_links');
+update_post_meta(1, 'image_links', 'https://example.test/manga/series/chapter/other.png');
+$relink_wrong_pages = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1));
+update_post_meta(1, 'image_links', $saved_relink_links);
+$relink_waiting = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1));
+$relink_key = 'manga_new_source_' . md5('/test/series/ตอนที่1|');
+$transients[$relink_key]['first_seen'] -= 301;
+$relinked = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1));
+$relinked_path = get_post_meta(1, 'imported_from_path');
+$relinked_links = get_post_meta(1, 'image_links');
 $posts[4] = (object) array('post_type' => 'chapter');
 update_post_meta(4, 'imported_from_path', '/test/series/chapter');
 manga_remember_deleted_import(4);
@@ -100,11 +127,13 @@ $posts[5] = (object) array('post_type' => 'manga');
 update_post_meta(5, '_manga_source_path', '/test/series');
 manga_remember_deleted_import(5);
 $series_excluded = get_option(manga_source_exclusion_key('series', '/test/series')) > 0;
-echo json_encode(compact('partial', 'complete', 'missing', 'no_cover', 'cover_first', 'cover_second', 'cover_removed', 'manual_cover', 'stable_first', 'stable_second', 'stable_after_wait', 'audit_missing', 'warning_count', 'audit_restored', 'warning_cleared', 'chapter_excluded', 'series_excluded'));
+echo json_encode(compact('thai_number', 'partial', 'complete', 'missing', 'no_cover', 'cover_first', 'cover_second', 'cover_removed', 'manual_cover', 'stable_first', 'stable_second', 'stable_after_wait', 'audit_missing', 'warning_count', 'warning_type_empty', 'audit_restored', 'warning_cleared', 'audit_renamed', 'warning_type_renamed', 'relink_ambiguous', 'relink_wrong_pages', 'relink_waiting', 'relinked', 'relinked_path', 'relinked_links', 'chapter_excluded', 'series_excluded'));
 `;
 const result = await php.run({ code: fixture });
 assert.equal(result.errors, '', result.errors);
 const value = JSON.parse(result.text);
+assert.equal(value.thai_number.chapter, 1);
+assert.equal(value.thai_number.confidence, 'high');
 assert.deepEqual(value.partial, []);
 assert.equal(value.complete.length, 2);
 assert.deepEqual(value.missing, []);
@@ -117,8 +146,17 @@ assert.equal(value.stable_second, false);
 assert.equal(value.stable_after_wait, true);
 assert.equal(value.audit_missing.missing, 1);
 assert.equal(value.warning_count, 1);
+assert.equal(value.warning_type_empty, 'images_unavailable');
 assert.equal(value.audit_restored.missing, 0);
 assert.equal(value.warning_cleared, '');
+assert.equal(value.audit_renamed.missing, 1);
+assert.equal(value.warning_type_renamed, 'folder_unavailable');
+assert.equal(value.relink_ambiguous, false);
+assert.equal(value.relink_wrong_pages, false);
+assert.equal(value.relink_waiting.code, 'manga_relink_waiting');
+assert.equal(value.relinked, true);
+assert.equal(value.relinked_path, '/test/series/ตอนที่1');
+assert.match(value.relinked_links, /ตอนที่1\/page01\.png/);
 assert.equal(value.chapter_excluded, true);
 assert.equal(value.series_excluded, true);
-console.log('PASS: missing/partial images, cover changes, stable-source gate, warnings and recovery, deliberate-deletion exclusions');
+console.log('PASS: missing/partial images, cover changes, stable-source gate, Thai-folder relink safety and recovery, deletion exclusions');
