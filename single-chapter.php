@@ -1248,8 +1248,56 @@ jQuery(document).ready(function($) {
         scrollContainer.scrollLeft = nextRange / 2;
     }
     
+    // Keep the point being read under the same viewport position while images resize.
+    function captureReadingAnchor() {
+        const viewport = scrollContainer.getBoundingClientRect();
+        const x = viewport.left + viewport.width / 2;
+        const y = viewport.top + viewport.height / 2;
+        const visiblePages = isContinuousMode() ? Array.from(pages) : [pages[currentPage]];
+        const page = visiblePages.find(candidate => {
+            if (!candidate) return false;
+            const bounds = candidate.getBoundingClientRect();
+            return bounds.top <= y && bounds.bottom >= y;
+        }) || visiblePages.reduce((nearest, candidate) => {
+            if (!candidate) return nearest;
+            const bounds = candidate.getBoundingClientRect();
+            const distance = Math.max(bounds.top - y, y - bounds.bottom, 0);
+            return distance < nearest.distance ? { page: candidate, distance } : nearest;
+        }, { page: null, distance: Infinity }).page;
+        if (!page) return null;
+
+        const image = page.querySelector('img');
+        const imageBounds = image?.getBoundingClientRect();
+        const target = imageBounds?.width && imageBounds.height
+            && imageBounds.left <= x && imageBounds.right >= x
+            && imageBounds.top <= y && imageBounds.bottom >= y ? image : page;
+        const bounds = target.getBoundingClientRect();
+        if (!bounds.width || !bounds.height) return null;
+        const horizontalRange = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+        return {
+            target, x, y,
+            fractionX: (x - bounds.left) / bounds.width,
+            fractionY: (y - bounds.top) / bounds.height,
+            preserveX: horizontalRange > 1 && Math.abs(scrollContainer.scrollLeft - horizontalRange / 2) > Math.max(8, horizontalRange * 0.15)
+        };
+    }
+
+    function restoreReadingAnchor(anchor) {
+        if (!anchor?.target.isConnected) return;
+        let bounds = anchor.target.getBoundingClientRect();
+        if (!bounds.width || !bounds.height) return;
+        const verticalShift = bounds.top + anchor.fractionY * bounds.height - anchor.y;
+        if (Math.abs(verticalShift) > 0.5) scrollContainer.scrollTop += verticalShift;
+        if (anchor.preserveX) {
+            bounds = anchor.target.getBoundingClientRect();
+            const horizontalShift = bounds.left + anchor.fractionX * bounds.width - anchor.x;
+            if (Math.abs(horizontalShift) > 0.5) scrollContainer.scrollLeft += horizontalShift;
+        }
+    }
+
     // Apply scale/zoom
     function applyScale() {
+        const readingAnchor = captureReadingAnchor();
         const scaleValue = scaleMode === 'auto' ? currentZoom : 1;
         pages.forEach(page => {
             const img = page.querySelector('img');
@@ -1263,6 +1311,7 @@ jQuery(document).ready(function($) {
         }
         updateLandscapeLayout();
         updateReaderImageLayout(scaleValue);
+        restoreReadingAnchor(readingAnchor);
     }
     
     // Update page display based on mode (PAGED MODE)
