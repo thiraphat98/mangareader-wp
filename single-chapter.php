@@ -1049,6 +1049,17 @@ jQuery(document).ready(function($) {
         }
     }
 
+    function loadVisibleReaderImages() {
+        if (readerImageObserver) return;
+        const viewport = scrollContainer.getBoundingClientRect();
+        pages.forEach((page, index) => {
+            const bounds = page.getBoundingClientRect();
+            if (bounds.bottom > viewport.top && bounds.top < viewport.bottom) {
+                loadReaderImage(index, true);
+            }
+        });
+    }
+
     // Fast scrolling may expose a page before the scroll handler runs.
     if (typeof window.IntersectionObserver === 'function') {
         readerImageObserver = new IntersectionObserver(entries => {
@@ -1070,6 +1081,7 @@ jQuery(document).ready(function($) {
     let isScrolling = false;
     let topBarManuallyVisible = false;
     let activeLandscapePage = -1;
+    let readerLayoutReady = false;
 
     pages.forEach((page, index) => {
         const image = page.querySelector('img');
@@ -1324,6 +1336,7 @@ jQuery(document).ready(function($) {
         updateLandscapeLayout();
         updateReaderImageLayout(scaleValue);
         restoreReadingAnchor(readingAnchor);
+        if (readerLayoutReady) loadVisibleReaderImages();
     }
     
     // Update page display based on mode (PAGED MODE)
@@ -1647,6 +1660,7 @@ jQuery(document).ready(function($) {
                     updateProgress();
                     updateLandscapeControls();
                     preloadNextImages(continuousPageIndex());
+                    loadVisibleReaderImages();
                 } else {
                     // A paged reader has one visible page; scrolling within a wide image must not change it.
                     updateReaderTopBarVisibility();
@@ -1740,6 +1754,8 @@ jQuery(document).ready(function($) {
     // Initial setup
     if (pages.length > 0) {
         updatePageDisplay();
+        readerLayoutReady = true;
+        loadVisibleReaderImages();
     }
     
     // Recalculate responsive reader layout after orientation/viewport changes.
@@ -1750,6 +1766,7 @@ jQuery(document).ready(function($) {
             applyScale();
         }
         updateReaderTopBarVisibility();
+        loadVisibleReaderImages();
     });
 
     // The top bar also changes the reader height without a window resize.
