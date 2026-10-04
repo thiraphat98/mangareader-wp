@@ -28,6 +28,7 @@ const names = [
   'manga_supported_image_files', 'manga_imported_source_files',
   'manga_get_chapter_image_urls', 'manga_set_cover_from_folder',
   'manga_new_source_stable', 'manga_audit_imported_sources',
+  'manga_source_exclusion_key', 'manga_remember_deleted_import',
 ];
 const functions = names.map((name) => {
   const node = ast.children.find((item) => item.kind === 'function' && item.name.name === name);
@@ -48,7 +49,7 @@ function manga_public_url($value) { return $value; }
 function add_query_arg($key, $value, $url) { return $url . '?'. $key . '=' . $value; }
 function manga_source_file_url($value) { return get_manga_base_url() . basename($value); }
 function manga_resolve_source_folder($value, $chapter) { return is_dir($value) ? array('path' => $value) : new WP_Error('missing', 'missing'); }
-$meta = array(); $transients = array(); $options = array();
+$meta = array(); $transients = array(); $options = array(); $posts = array();
 function get_post_meta($id, $key, $single = true) { global $meta; return $meta[$id][$key] ?? ''; }
 function update_post_meta($id, $key, $value) { global $meta; $meta[$id][$key] = $value; }
 function delete_post_meta($id, $key) { global $meta; unset($meta[$id][$key]); }
@@ -57,6 +58,7 @@ function set_transient($key, $value, $expiry) { global $transients; $transients[
 function get_option($key, $default = false) { global $options; return $options[$key] ?? $default; }
 function update_option($key, $value, $autoload = false) { global $options; $options[$key] = $value; }
 function get_posts($args) { return array(1); }
+function get_post($id) { global $posts; return $posts[$id] ?? null; }
 ${functions}
 mkdir('/test/series/chapter', 0777, true);
 update_post_meta(1, 'imported_from_path', '/test/series/chapter');
@@ -90,7 +92,15 @@ $warning_count = get_post_meta(1, '_manga_source_missing_checks');
 file_put_contents('/test/series/chapter/01.jpg', 'restored');
 $audit_restored = manga_audit_imported_sources();
 $warning_cleared = get_post_meta(1, '_manga_source_health');
-echo json_encode(compact('partial', 'complete', 'missing', 'no_cover', 'cover_first', 'cover_second', 'cover_removed', 'manual_cover', 'stable_first', 'stable_second', 'stable_after_wait', 'audit_missing', 'warning_count', 'audit_restored', 'warning_cleared'));
+$posts[4] = (object) array('post_type' => 'chapter');
+update_post_meta(4, 'imported_from_path', '/test/series/chapter');
+manga_remember_deleted_import(4);
+$chapter_excluded = get_option(manga_source_exclusion_key('chapter', '/test/series/chapter')) > 0;
+$posts[5] = (object) array('post_type' => 'manga');
+update_post_meta(5, '_manga_source_path', '/test/series');
+manga_remember_deleted_import(5);
+$series_excluded = get_option(manga_source_exclusion_key('series', '/test/series')) > 0;
+echo json_encode(compact('partial', 'complete', 'missing', 'no_cover', 'cover_first', 'cover_second', 'cover_removed', 'manual_cover', 'stable_first', 'stable_second', 'stable_after_wait', 'audit_missing', 'warning_count', 'audit_restored', 'warning_cleared', 'chapter_excluded', 'series_excluded'));
 `;
 const result = await php.run({ code: fixture });
 assert.equal(result.errors, '', result.errors);
@@ -109,4 +119,6 @@ assert.equal(value.audit_missing.missing, 1);
 assert.equal(value.warning_count, 1);
 assert.equal(value.audit_restored.missing, 0);
 assert.equal(value.warning_cleared, '');
-console.log('PASS: missing/partial images, late/replaced/removed/manual covers, stable-source gate, missing-source warning and recovery');
+assert.equal(value.chapter_excluded, true);
+assert.equal(value.series_excluded, true);
+console.log('PASS: missing/partial images, cover changes, stable-source gate, warnings and recovery, deliberate-deletion exclusions');

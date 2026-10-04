@@ -1156,6 +1156,30 @@ function manga_acquire_import_lock($key) {
     return false;
 }
 
+/** A deliberate permanent deletion must not be undone by the next cron scan. */
+function manga_source_exclusion_key($type, $path, $source_group = '') {
+    return 'manga_source_excluded_' . md5($type . '|' . wp_normalize_path((string) $path) . '|' . $source_group);
+}
+function manga_remember_deleted_import($post_id) {
+    $post = get_post($post_id);
+    if (!$post) {
+        return;
+    }
+    if ($post->post_type === 'chapter') {
+        $path = (string) get_post_meta($post_id, 'imported_from_path', true);
+        if ($path !== '') {
+            update_option(manga_source_exclusion_key('chapter', $path,
+                (string) get_post_meta($post_id, '_manga_source_group', true)), time(), false);
+        }
+    } elseif ($post->post_type === 'manga') {
+        $path = (string) get_post_meta($post_id, '_manga_source_path', true);
+        if ($path !== '') {
+            update_option(manga_source_exclusion_key('series', $path), time(), false);
+        }
+    }
+}
+add_action('before_delete_post', 'manga_remember_deleted_import');
+
 function manga_find_or_create_from_folder($series_path) {
     $resolved = manga_resolve_source_folder($series_path, false);
     if (is_wp_error($resolved)) {
@@ -1828,6 +1852,9 @@ function manga_auto_sync_library() {
         if (is_wp_error($resolved_series)) {
             continue;
         }
+        if (get_option(manga_source_exclusion_key('series', $resolved_series['series_path']))) {
+            continue;
+        }
 
         $existing_manga = manga_imported_series_matches($resolved_series);
         $manga_id = manga_find_or_create_from_folder($resolved_series['path']);
@@ -1861,6 +1888,9 @@ function manga_auto_sync_library() {
 
             $chapter_path = $chapter_folder['path'];
             $source_group = $chapter_folder['source_group'];
+            if (get_option(manga_source_exclusion_key('chapter', $chapter_path, $source_group))) {
+                continue;
+            }
             $chapter_lock = manga_acquire_import_lock('chapter:' . $chapter_path);
             if (!$chapter_lock) {
                 $sync_errors[] = 'Chapter is currently being imported; retry next scan: ' . $chapter_path;
@@ -2104,6 +2134,7 @@ function render_folder_import_page() {
             if (is_wp_error($manga_id)) {
                 $import_status = '<div class="notice notice-error"><p>' . esc_html($manga_id->get_error_message()) . '</p></div>';
             } else {
+                delete_option(manga_source_exclusion_key('series', $resolved['series_path']));
                 $import_status = '<div class="notice notice-success"><p>✓ Manga entry is ready: ' . esc_html($resolved['series_name']) . ' (cover imported when available).</p></div>';
             }
         }
@@ -2631,6 +2662,8 @@ function manga_process_folder_import_batch() {
         wp_send_json_error(array('message' => 'Publishing failed. The draft was retained for recovery.'));
     }
     mark_chapter_as_imported($job['path']);
+    delete_option(manga_source_exclusion_key('chapter', $job['path']));
+    delete_option(manga_source_exclusion_key('series', $job['series_path']));
     delete_option($chapter_lock);
     delete_transient($transient_key);    wp_send_json_success(array(
         'done' => true,
