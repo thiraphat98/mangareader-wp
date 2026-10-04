@@ -606,6 +606,16 @@
 
 .reader-main-content.longstrip-content .reader-page {
     margin-bottom: 0;
+    justify-content: center;
+}
+
+.reader-main-content.longstrip-content {
+    padding: 0;
+    scrollbar-gutter: stable both-edges;
+}
+
+.reader-main-content.continuous-mode {
+    overflow-x: auto;
 }
 
 .reader-main-content.webtoon-content {
@@ -1114,6 +1124,30 @@ jQuery(document).ready(function($) {
         });
     }
     
+    function updateLongstripLayout(scaleValue) {
+        if (readingMode !== 'longstrip') return;
+
+        const viewer = document.getElementById('readerViewer');
+        const styles = getComputedStyle(scrollContainer);
+        const padding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+        const baseWidth = Math.min(1000, Math.max(1, scrollContainer.clientWidth - padding));
+        const widths = Array.from(pages, page => {
+            const image = page.querySelector('img');
+            return scaleMode !== 'width' && imageFit === 'original' && image?.naturalWidth
+                ? image.naturalWidth * scaleValue
+                : baseWidth * scaleValue;
+        });
+        viewer.style.width = Math.ceil(widths.reduce((max, width) => Math.max(max, width), baseWidth)) + 'px';
+        viewer.style.maxWidth = 'none';
+
+        pages.forEach((page, index) => {
+            const image = page.querySelector('img');
+            page.style.width = '100%';
+            if (image) image.style.width = Math.round(widths[index]) + 'px';
+        });
+        scrollContainer.scrollLeft = Math.max(0, (scrollContainer.scrollWidth - scrollContainer.clientWidth) / 2);
+    }
+
     // Apply scale/zoom
     function applyScale() {
         if (scaleMode === 'width') {
@@ -1126,6 +1160,7 @@ jQuery(document).ready(function($) {
                 }
             });
             if (zoomLevelDisplay) zoomLevelDisplay.textContent = 'Fit Width';
+            updateLongstripLayout(1);
             return;
         }
         
@@ -1151,6 +1186,7 @@ jQuery(document).ready(function($) {
         if (zoomLevelDisplay && scaleMode !== 'width') {
             zoomLevelDisplay.textContent = Math.round(scaleValue * 100) + '%';
         }
+        updateLongstripLayout(scaleValue);
     }
     
     // Update page display based on mode (PAGED MODE)
@@ -1158,6 +1194,10 @@ jQuery(document).ready(function($) {
         updatePageArrowVisibility();
         if (isContinuousMode()) {
             const viewer = document.getElementById('readerViewer');
+            if (readingMode !== 'longstrip') {
+                viewer.style.width = '';
+                viewer.style.maxWidth = '';
+            }
             viewer.classList.toggle('webtoon-mode', readingMode === 'webtoon');
             scrollContainer.classList.toggle('webtoon-content', readingMode === 'webtoon');
             scrollContainer.classList.toggle('longstrip-content', readingMode === 'longstrip');
@@ -1170,6 +1210,8 @@ jQuery(document).ready(function($) {
             updatePageIndicatorVisibility();
         } else {
             const viewer = document.getElementById('readerViewer');
+            viewer.style.width = '';
+            viewer.style.maxWidth = '';
             viewer.classList.remove('webtoon-mode');
             scrollContainer.classList.remove('webtoon-content');
             scrollContainer.classList.remove('longstrip-content');
@@ -1575,6 +1617,8 @@ jQuery(document).ready(function($) {
     window.addEventListener('resize', function() {
         if (readingMode === 'webtoon') {
             updatePageDisplay();
+        } else if (readingMode === 'longstrip') {
+            applyScale();
         }
         updateReaderTopBarVisibility();
     });
