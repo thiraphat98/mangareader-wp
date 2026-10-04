@@ -1164,6 +1164,15 @@ jQuery(document).ready(function($) {
         container.classList.toggle('has-landscape-page', visibleLandscape);
     }
 
+    function landscapeFitWidth(image, availableWidth, availableHeight) {
+        const aspectRatio = image.naturalWidth / image.naturalHeight;
+        const minimumScale = window.innerWidth <= 480 ? 1.5 : window.innerWidth <= 768 ? 1.25 : 1;
+        // Keep wide spreads readable on narrow screens without enlarging beyond the source.
+        const readingWidth = Math.max(availableWidth * minimumScale, availableHeight * 0.55 * aspectRatio);
+        return Math.min(image.naturalWidth, availableWidth * 4, readingWidth);
+    }
+
+    // Wide spreads use real layout width, so the reader can pan instead of clipping a transform.
     function updateLandscapeLayout() {
         const viewer = document.getElementById('readerViewer');
         const page = pages[currentPage];
@@ -1188,11 +1197,7 @@ jQuery(document).ready(function($) {
         const styles = getComputedStyle(scrollContainer);
         const availableWidth = Math.max(1, scrollContainer.clientWidth - parseFloat(styles.paddingLeft) - parseFloat(styles.paddingRight));
         const availableHeight = Math.max(1, scrollContainer.clientHeight - parseFloat(styles.paddingTop) - parseFloat(styles.paddingBottom));
-        const aspectRatio = image.naturalWidth / image.naturalHeight;
-        const minimumScale = window.innerWidth <= 480 ? 1.5 : window.innerWidth <= 768 ? 1.25 : 1;
-        // Give a spread readable height on narrow screens, while limiting initial pan and avoiding upscaling beyond the source.
-        const readingWidth = Math.max(availableWidth * minimumScale, availableHeight * 0.55 * aspectRatio);
-        const fitWidth = Math.min(image.naturalWidth, availableWidth * 4, readingWidth);
+        const fitWidth = landscapeFitWidth(image, availableWidth, availableHeight);
         const baseWidth = scaleMode === 'width' ? availableWidth : imageFit === 'original' ? image.naturalWidth : fitWidth;
         const zoom = scaleMode === 'auto' ? currentZoom : 1;
 
@@ -1207,7 +1212,7 @@ jQuery(document).ready(function($) {
         scrollContainer.scrollLeft = nextRange * position;
     }
 
-    // Size images in normal flow in every mode. Only wide paged spreads use their own pan layout.
+    // Size images in normal flow in every mode; wide continuous spreads may exceed the viewport.
     function updateReaderImageLayout(scaleValue) {
         const continuous = isContinuousMode();
         const current = pages[currentPage];
@@ -1215,12 +1220,16 @@ jQuery(document).ready(function($) {
         const viewer = document.getElementById('readerViewer');
         const styles = getComputedStyle(scrollContainer);
         const padding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
-        const baseWidth = Math.min(readingMode === 'webtoon' ? 900 : 1000, Math.max(1, scrollContainer.clientWidth - padding));
+        const availableWidth = Math.max(1, scrollContainer.clientWidth - padding);
+        const availableHeight = Math.max(1, scrollContainer.clientHeight - (parseFloat(styles.paddingTop) || 0) - (parseFloat(styles.paddingBottom) || 0));
+        const baseWidth = Math.min(readingMode === 'webtoon' ? 900 : 1000, availableWidth);
         const activePages = continuous ? Array.from(pages) : current ? [current] : [];
         const widths = activePages.map(page => {
             const image = page.querySelector('img');
             const naturalWidth = image?.naturalWidth || 0;
+            const isLandscape = page.classList.contains('is-landscape') && naturalWidth && image.naturalHeight;
             const fittedWidth = scaleMode === 'width' ? baseWidth
+                : isLandscape ? imageFit === 'original' ? naturalWidth : landscapeFitWidth(image, availableWidth, availableHeight)
                 : imageFit === 'original' && naturalWidth ? naturalWidth
                 : imageFit === 'contain' && naturalWidth ? Math.min(baseWidth, naturalWidth)
                 : baseWidth;
@@ -1234,12 +1243,11 @@ jQuery(document).ready(function($) {
             page.style.width = '100%';
             if (image) image.style.width = widths[index] + 'px';
         });
-        if (!continuous) {
-            scrollContainer.classList.toggle('landscape-pan', widths[0] > scrollContainer.clientWidth - padding + 1);
-        }
-        scrollContainer.scrollLeft = Math.max(0, (scrollContainer.scrollWidth - scrollContainer.clientWidth) / 2);
+        const nextRange = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+        scrollContainer.classList.toggle('landscape-pan', nextRange > 1);
+        scrollContainer.scrollLeft = nextRange / 2;
     }
-
+    
     // Apply scale/zoom
     function applyScale() {
         const scaleValue = scaleMode === 'auto' ? currentZoom : 1;
@@ -1684,7 +1692,7 @@ jQuery(document).ready(function($) {
     // The top bar also changes the reader height without a window resize.
     if ('ResizeObserver' in window) {
         const readerSizeObserver = new ResizeObserver(() => {
-            if (readingMode === 'paged') applyScale();
+            applyScale();
         });
         readerSizeObserver.observe(scrollContainer);
     }
