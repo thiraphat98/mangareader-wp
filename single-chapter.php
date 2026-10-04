@@ -610,6 +610,10 @@
 }
 
 .reader-main-content.longstrip-content .reader-page {
+    margin-bottom: 20px;
+}
+
+.reader-main-content.longstrip-content .reader-page:last-child {
     margin-bottom: 0;
 }
 
