@@ -628,13 +628,35 @@
     border-radius: 4px;
 }
 
-.reader-main-content.continuous-mode .reader-page.is-landscape {
-    position: relative;
-    left: 50%;
-    width: calc(100vw - 40px);
+/* Loaded continuous pages must use their rendered image height, not the loading placeholder. */
+.reader-main-content.continuous-mode .reader-page.has-loaded-image {
+    min-height: 0;
+}
+
+.reader-main-content.continuous-mode .reader-page {
+    justify-content: center;
+}
+
+.reader-main-content.continuous-mode .reader-page img {
+    flex: none;
     max-width: none;
-    transform: translateX(-50%);
-    justify-content: flex-start;
+}
+
+.reader-main-content.longstrip-content .reader-page {
+    margin-bottom: 20px;
+}
+
+.reader-main-content.longstrip-content .reader-page:last-child {
+    margin-bottom: 0;
+}
+
+.reader-main-content.continuous-mode .reader-page.is-landscape {
+    position: static;
+    left: auto;
+    width: 100%;
+    max-width: none;
+    transform: none;
+    justify-content: center;
 }
 
 .reader-main-content.continuous-mode .reader-page.is-landscape img {
@@ -642,17 +664,18 @@
     max-width: none;
 }
 
+.reader-main-content.longstrip-content {
+    padding: 0;
+}
+
 .reader-main-content.continuous-mode {
     overflow-x: auto;
+    scrollbar-gutter: stable both-edges;
 }
 
 .reader-main-content.webtoon-content {
     padding: 0;
     overflow-x: auto;
-}
-
-.reader-main-content.webtoon-content .reader-page.is-landscape {
-    width: 100vw;
 }
 
 .reader-viewer.webtoon-mode {
@@ -673,7 +696,7 @@
     max-height: none;
     height: auto;
     display: block;
-    margin: 0;
+    margin: 0 auto;
     border-radius: 0;
 }
 
@@ -695,7 +718,8 @@
     opacity: 0;
 }
 
-.manga-reader-container:hover .nav-arrow {
+.manga-reader-container:hover .nav-arrow,
+.manga-reader-container.show-page-arrows .nav-arrow {
     opacity: 1;
 }
 
@@ -840,35 +864,28 @@
     background: rgba(0, 0, 0, 0.7);
 }
 
-/* Hide zoom controls on mobile devices */
+/* Keep zoom controls usable on touch screens, including portrait pages. */
 @media (max-width: 768px) {
     .reader-zoom-controls {
-        display: none !important;
-        visibility: hidden !important;
-    }
-
-    .manga-reader-container.has-landscape-page .reader-zoom-controls {
-        display: flex !important;
-        visibility: visible !important;
         right: 8px;
         bottom: 8px;
         gap: 4px;
         padding: 4px;
     }
 
-    .manga-reader-container.has-landscape-page .zoom-btn {
+    .zoom-btn {
         min-width: 36px;
         min-height: 36px;
         padding: 6px;
     }
 
-    .manga-reader-container.has-landscape-page .zoom-level {
+    .zoom-level {
         padding: 0 4px;
     }
 }
 
 @media (max-width: 480px) {
-    .manga-reader-container.has-landscape-page .page-indicator {
+    .page-indicator {
         left: 8px;
         bottom: 12px;
         transform: none;
@@ -1060,23 +1077,46 @@ jQuery(document).ready(function($) {
     const resetZoomBtn = document.getElementById('resetZoomBtn');
     const zoomLevelDisplay = document.getElementById('zoomLevelDisplay');
     const scrollContainer = document.getElementById('readerMainContent');
-    const deferredReaderImages = document.querySelectorAll('.reader-page img[data-src]');
-    if ('IntersectionObserver' in window) {
-        const readerImageObserver = new IntersectionObserver((entries, observer) => {
-            entries.forEach(entry => {
-                if (!entry.isIntersecting) return;
-                const image = entry.target;
-                image.src = image.dataset.src;
-                image.removeAttribute('data-src');
-                observer.unobserve(image);
-            });
-        }, { root: scrollContainer, rootMargin: '800px 0px', threshold: 0.01 });
-        deferredReaderImages.forEach(image => readerImageObserver.observe(image));
-    } else {
-        deferredReaderImages.forEach(image => {
-            image.src = image.dataset.src;
-            image.removeAttribute('data-src');
+    let readerImageObserver = null;
+    function loadReaderImage(index, highPriority = false) {
+        const image = pages[index]?.querySelector('img[data-src]');
+        if (!image?.dataset.src) return;
+        const source = image.dataset.src;
+        image.setAttribute('fetchpriority', highPriority ? 'high' : 'low');
+        image.loading = 'eager';
+        image.removeAttribute('data-src');
+        image.src = source;
+        readerImageObserver?.unobserve(image);
+    }
+
+    // Fetch the active image and exactly the next two images, even when pages are hidden.
+    function preloadNextImages(index) {
+        if (!totalPages || !Number.isFinite(index)) return;
+        const first = Math.max(0, Math.min(totalPages - 1, Math.trunc(index)));
+        for (let offset = 0; offset <= 2 && first + offset < totalPages; offset++) {
+            loadReaderImage(first + offset, offset === 0);
+        }
+    }
+
+    function loadVisibleReaderImages() {
+        if (readerImageObserver) return;
+        const viewport = scrollContainer.getBoundingClientRect();
+        pages.forEach((page, index) => {
+            const bounds = page.getBoundingClientRect();
+            if (bounds.bottom > viewport.top && bounds.top < viewport.bottom) {
+                loadReaderImage(index, true);
+            }
         });
+    }
+
+    // Fast scrolling may expose a page before the scroll handler runs.
+    if (typeof window.IntersectionObserver === 'function') {
+        readerImageObserver = new IntersectionObserver(entries => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) loadReaderImage(Number(entry.target.dataset.pageIndex), true);
+            });
+        }, { root: scrollContainer, rootMargin: '0px', threshold: 0.01 });
+        document.querySelectorAll('.reader-page img[data-src]').forEach(image => readerImageObserver.observe(image));
     }
     
     // State
@@ -1090,12 +1130,14 @@ jQuery(document).ready(function($) {
     let isScrolling = false;
     let topBarManuallyVisible = false;
     let activeLandscapePage = -1;
+    let readerLayoutReady = false;
 
     pages.forEach((page, index) => {
         const image = page.querySelector('img');
         if (!image) return;
         const updateOrientation = () => {
             if (!image.naturalWidth || !image.naturalHeight) return;
+            page.classList.add('has-loaded-image');
             page.classList.toggle('is-landscape', image.naturalWidth > image.naturalHeight);
             if (index === currentPage || isContinuousMode()) applyScale();
         };
@@ -1113,7 +1155,7 @@ jQuery(document).ready(function($) {
     }
 
     function updatePageArrowVisibility() {
-        container.classList.toggle('show-page-arrows', navMode === 'buttons' && !isContinuousMode());
+        container.classList.toggle('show-page-arrows', navMode === 'buttons');
     }
 
     function updateReaderTopBarVisibility() {
@@ -1174,24 +1216,8 @@ jQuery(document).ready(function($) {
         pages.forEach(page => {
             const img = page.querySelector('img');
             if (img) {
-                if (readingMode === 'webtoon') {
-                    img.style.objectFit = 'contain';
-                    img.style.height = 'auto';
-                    return;
-                }
-                if (imageFit === 'contain') {
-                    img.style.objectFit = 'contain';
-                    img.style.width = '100%';
-                    img.style.height = 'auto';
-                } else if (imageFit === 'cover') {
-                    img.style.objectFit = 'cover';
-                    img.style.width = '100%';
-                    img.style.height = '100%';
-                } else if (imageFit === 'original') {
-                    img.style.objectFit = 'initial';
-                    img.style.width = 'auto';
-                    img.style.height = 'auto';
-                }
+                img.style.objectFit = imageFit === 'original' ? 'initial' : imageFit;
+                img.style.height = 'auto';
             }
         });
     }
@@ -1209,6 +1235,14 @@ jQuery(document).ready(function($) {
             visibleLandscape = pages[currentPage]?.classList.contains('is-landscape') || false;
         }
         container.classList.toggle('has-landscape-page', visibleLandscape);
+    }
+
+    function landscapeFitWidth(image, availableWidth, availableHeight) {
+        const aspectRatio = image.naturalWidth / image.naturalHeight;
+        const minimumScale = window.innerWidth <= 480 ? 1.5 : window.innerWidth <= 768 ? 1.25 : 1;
+        // Keep wide spreads readable on narrow screens without enlarging beyond the source.
+        const readingWidth = Math.max(availableWidth * minimumScale, availableHeight * 0.55 * aspectRatio);
+        return Math.min(image.naturalWidth, availableWidth * 4, readingWidth);
     }
 
     // Wide spreads use real layout width, so the reader can pan instead of clipping a transform.
@@ -1236,11 +1270,7 @@ jQuery(document).ready(function($) {
         const styles = getComputedStyle(scrollContainer);
         const availableWidth = Math.max(1, scrollContainer.clientWidth - parseFloat(styles.paddingLeft) - parseFloat(styles.paddingRight));
         const availableHeight = Math.max(1, scrollContainer.clientHeight - parseFloat(styles.paddingTop) - parseFloat(styles.paddingBottom));
-        const aspectRatio = image.naturalWidth / image.naturalHeight;
-        const minimumScale = window.innerWidth <= 480 ? 1.5 : window.innerWidth <= 768 ? 1.25 : 1;
-        // Give a spread readable height on narrow screens, while limiting initial pan and avoiding upscaling beyond the source.
-        const readingWidth = Math.max(availableWidth * minimumScale, availableHeight * 0.55 * aspectRatio);
-        const fitWidth = Math.min(image.naturalWidth, availableWidth * 4, readingWidth);
+        const fitWidth = landscapeFitWidth(image, availableWidth, availableHeight);
         const baseWidth = scaleMode === 'width' ? availableWidth : imageFit === 'original' ? image.naturalWidth : fitWidth;
         const zoom = scaleMode === 'auto' ? currentZoom : 1;
 
@@ -1254,45 +1284,109 @@ jQuery(document).ready(function($) {
         const nextRange = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
         scrollContainer.scrollLeft = nextRange * position;
     }
+
+    // Size images in normal flow in every mode; wide continuous spreads may exceed the viewport.
+    function updateReaderImageLayout(scaleValue) {
+        const continuous = isContinuousMode();
+        const current = pages[currentPage];
+        if (!continuous && current?.classList.contains('is-landscape') && current.querySelector('img')?.naturalWidth) return;
+        const viewer = document.getElementById('readerViewer');
+        const styles = getComputedStyle(scrollContainer);
+        const padding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+        const availableWidth = Math.max(1, scrollContainer.clientWidth - padding);
+        const availableHeight = Math.max(1, scrollContainer.clientHeight - (parseFloat(styles.paddingTop) || 0) - (parseFloat(styles.paddingBottom) || 0));
+        const baseWidth = Math.min(readingMode === 'webtoon' ? 900 : 1000, availableWidth);
+        const activePages = continuous ? Array.from(pages) : current ? [current] : [];
+        const widths = activePages.map(page => {
+            const image = page.querySelector('img');
+            const naturalWidth = image?.naturalWidth || 0;
+            const isLandscape = page.classList.contains('is-landscape') && naturalWidth && image.naturalHeight;
+            const fittedWidth = scaleMode === 'width' ? baseWidth
+                : isLandscape ? imageFit === 'original' ? naturalWidth : landscapeFitWidth(image, availableWidth, availableHeight)
+                : imageFit === 'original' && naturalWidth ? naturalWidth
+                : imageFit === 'contain' && naturalWidth ? Math.min(baseWidth, naturalWidth)
+                : baseWidth;
+            return Math.max(1, Math.round(fittedWidth * scaleValue));
+        });
+        viewer.style.width = Math.ceil(widths.reduce((max, width) => Math.max(max, width), baseWidth)) + 'px';
+        viewer.style.maxWidth = 'none';
+
+        activePages.forEach((page, index) => {
+            const image = page.querySelector('img');
+            page.style.width = '100%';
+            if (image) image.style.width = widths[index] + 'px';
+        });
+        const nextRange = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+        scrollContainer.classList.toggle('landscape-pan', nextRange > 1);
+        scrollContainer.scrollLeft = nextRange / 2;
+    }
     
+    // Keep the point being read under the same viewport position while images resize.
+    function captureReadingAnchor() {
+        const viewport = scrollContainer.getBoundingClientRect();
+        const x = viewport.left + viewport.width / 2;
+        const y = viewport.top + viewport.height / 2;
+        const visiblePages = isContinuousMode() ? Array.from(pages) : [pages[currentPage]];
+        const page = visiblePages.find(candidate => {
+            if (!candidate) return false;
+            const bounds = candidate.getBoundingClientRect();
+            return bounds.top <= y && bounds.bottom >= y;
+        }) || visiblePages.reduce((nearest, candidate) => {
+            if (!candidate) return nearest;
+            const bounds = candidate.getBoundingClientRect();
+            const distance = Math.max(bounds.top - y, y - bounds.bottom, 0);
+            return distance < nearest.distance ? { page: candidate, distance } : nearest;
+        }, { page: null, distance: Infinity }).page;
+        if (!page) return null;
+
+        const image = page.querySelector('img');
+        const imageBounds = image?.getBoundingClientRect();
+        const target = imageBounds?.width && imageBounds.height
+            && imageBounds.left <= x && imageBounds.right >= x
+            && imageBounds.top <= y && imageBounds.bottom >= y ? image : page;
+        const bounds = target.getBoundingClientRect();
+        if (!bounds.width || !bounds.height) return null;
+        const horizontalRange = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+        return {
+            target, x, y,
+            fractionX: (x - bounds.left) / bounds.width,
+            fractionY: (y - bounds.top) / bounds.height,
+            preserveX: horizontalRange > 1 && Math.abs(scrollContainer.scrollLeft - horizontalRange / 2) > Math.max(8, horizontalRange * 0.15)
+        };
+    }
+
+    function restoreReadingAnchor(anchor) {
+        if (!anchor?.target.isConnected) return;
+        let bounds = anchor.target.getBoundingClientRect();
+        if (!bounds.width || !bounds.height) return;
+        const verticalShift = bounds.top + anchor.fractionY * bounds.height - anchor.y;
+        if (Math.abs(verticalShift) > 0.5) scrollContainer.scrollTop += verticalShift;
+        if (anchor.preserveX) {
+            bounds = anchor.target.getBoundingClientRect();
+            const horizontalShift = bounds.left + anchor.fractionX * bounds.width - anchor.x;
+            if (Math.abs(horizontalShift) > 0.5) scrollContainer.scrollLeft += horizontalShift;
+        }
+    }
+
     // Apply scale/zoom
     function applyScale() {
-        if (scaleMode === 'width') {
-            pages.forEach(page => {
-                const img = page.querySelector('img');
-                if (img) {
-                    img.style.width = '100%';
-                    img.style.height = 'auto';
-                    img.style.transform = 'none';
-                }
-            });
-            if (zoomLevelDisplay) zoomLevelDisplay.textContent = 'Fit Width';
-            updateLandscapeLayout();
-            return;
-        }
-        
-        let scaleValue = (scaleMode === '100') ? 1 : currentZoom;
-        
+        const readingAnchor = captureReadingAnchor();
+        const scaleValue = scaleMode === 'auto' ? currentZoom : 1;
         pages.forEach(page => {
             const img = page.querySelector('img');
             if (img) {
-                if (readingMode === 'webtoon' || (readingMode === 'longstrip' && page.classList.contains('is-landscape'))) {
-                    // Scale in layout so the image height grows with its width.
-                    // CSS transforms do not affect flow and leave gaps between pages.
-                    img.style.width = (scaleValue * 100) + '%';
-                    img.style.height = 'auto';
-                    img.style.transform = 'none';
-                } else {
-                    img.style.transform = `scale(${scaleValue})`;
-                    img.style.transformOrigin = 'center';
-                }
+                img.style.height = 'auto';
+                img.style.transform = 'none';
             }
         });
-        
-        if (zoomLevelDisplay && scaleMode !== 'width') {
-            zoomLevelDisplay.textContent = Math.round(scaleValue * 100) + '%';
+        if (zoomLevelDisplay) {
+            zoomLevelDisplay.textContent = scaleMode === 'width' ? 'Fit Width' : Math.round(scaleValue * 100) + '%';
         }
         updateLandscapeLayout();
+        updateReaderImageLayout(scaleValue);
+        restoreReadingAnchor(readingAnchor);
+        updateProgressBar();
+        if (readerLayoutReady) loadVisibleReaderImages();
     }
     
     // Update page display based on mode (PAGED MODE)
@@ -1302,6 +1396,7 @@ jQuery(document).ready(function($) {
             const viewer = document.getElementById('readerViewer');
             viewer.classList.toggle('webtoon-mode', readingMode === 'webtoon');
             scrollContainer.classList.toggle('webtoon-content', readingMode === 'webtoon');
+            scrollContainer.classList.toggle('longstrip-content', readingMode === 'longstrip');
             scrollContainer.classList.add('continuous-mode');
             pages.forEach(page => {
                 page.style.display = 'flex';
@@ -1313,6 +1408,7 @@ jQuery(document).ready(function($) {
             const viewer = document.getElementById('readerViewer');
             viewer.classList.remove('webtoon-mode');
             scrollContainer.classList.remove('webtoon-content');
+            scrollContainer.classList.remove('longstrip-content');
             scrollContainer.classList.remove('continuous-mode');
             pages.forEach((page, index) => {
                 page.style.display = index === currentPage ? 'flex' : 'none';
@@ -1327,22 +1423,44 @@ jQuery(document).ready(function($) {
                 pages[currentPage].scrollIntoView({ behavior: 'instant', block: 'start' });
             }
         }
+        preloadNextImages(isContinuousMode() ? continuousPageIndex() : currentPage);
         applyScale();
     }
     
-    // Update progress bar
-    function updateProgress() {
-        if (isContinuousMode() && scrollContainer) {
-            const scrollTop = scrollContainer.scrollTop;
-            const scrollHeight = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-            if (scrollHeight > 0) {
-                const progress = (scrollTop / scrollHeight) * 100;
-                if (progressFill) progressFill.style.width = progress + '%';
+    // Base continuous progress on the visible page, not the changing height of deferred pages.
+    function updateProgressBar() {
+        if (!progressFill || !totalPages) return;
+        let progress;
+        if (isContinuousMode()) {
+            const maxScroll = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+            const viewport = scrollContainer.getBoundingClientRect();
+            const lastPage = pages[totalPages - 1];
+            const lastPageEnd = lastPage.classList.contains('has-loaded-image')
+                && lastPage.getBoundingClientRect().bottom <= viewport.bottom + 3;
+            if (maxScroll <= 1 || lastPageEnd) {
+                progress = 100;
+            } else if (scrollContainer.scrollTop <= 1) {
+                progress = 0;
+            } else {
+                const readingLine = viewport.top + viewport.height / 2;
+                let index = 0;
+                pages.forEach((page, pageIndex) => {
+                    if (page.getBoundingClientRect().top <= readingLine) index = pageIndex;
+                });
+                const pageBounds = pages[index].getBoundingClientRect();
+                const pageFraction = pageBounds.height > 0
+                    ? Math.max(0, Math.min(1, (readingLine - pageBounds.top) / pageBounds.height))
+                    : 0;
+                progress = ((index + pageFraction) / totalPages) * 100;
             }
-        } else if (totalPages > 0) {
-            const progress = ((currentPage + 1) / totalPages) * 100;
-            if (progressFill) progressFill.style.width = progress + '%';
+        } else {
+            progress = ((currentPage + 1) / totalPages) * 100;
         }
+        progressFill.style.width = Math.max(0, Math.min(100, progress)) + '%';
+    }
+
+    function updateProgress() {
+        updateProgressBar();
         updateReaderTopBarVisibility();
     }
     
@@ -1355,7 +1473,11 @@ jQuery(document).ready(function($) {
     
     // Navigate to next page (Paged mode only)
     function nextPage() {
-        if (isContinuousMode()) return;
+        if (isContinuousMode()) {
+            const next = pages[continuousPageIndex() + 1];
+            if (next) next.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+            return;
+        }
 
         if (currentPage < totalPages - 1) {
             currentPage++;
@@ -1363,14 +1485,27 @@ jQuery(document).ready(function($) {
         }
     }
     
-    // Navigate to previous page (Paged mode only)
+    // Navigate to the previous page or image.
     function prevPage() {
-        if (isContinuousMode()) return;
+        if (isContinuousMode()) {
+            const previous = pages[continuousPageIndex() - 1];
+            if (previous) previous.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
+            return;
+        }
 
         if (currentPage > 0) {
             currentPage--;
             updatePageDisplay();
         }
+    }
+
+    function continuousPageIndex() {
+        const top = scrollContainer.getBoundingClientRect().top + 2;
+        let index = 0;
+        pages.forEach((page, i) => {
+            if (page.getBoundingClientRect().top <= top) index = i;
+        });
+        return index;
     }
     
     // LONG STRIP MODE: Navigate to next image when clicking
@@ -1382,7 +1517,7 @@ jQuery(document).ready(function($) {
         
         if (currentIndex < allPages.length - 1) {
             const nextPage = allPages[currentIndex + 1];
-            nextPage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            nextPage.scrollIntoView({ behavior: 'smooth', block: 'start', inline: 'nearest' });
         }
     }
     
@@ -1410,6 +1545,7 @@ jQuery(document).ready(function($) {
         scaleMode = mode;
         if (mode === 'auto' || mode === '100') {
             currentZoom = 1;
+            localStorage.setItem('readerZoomLevel', '1');
         }
         applyScale();
         localStorage.setItem('readerScaleMode', mode);
@@ -1454,7 +1590,6 @@ jQuery(document).ready(function($) {
         currentZoom = 1;
         localStorage.setItem('readerZoomLevel', '1');
         setScaleMode('auto');
-        applyScale();
         document.querySelectorAll('[data-setting="scale"]').forEach(btn => {
             btn.classList.remove('active');
             if (btn.dataset.value === 'auto') {
@@ -1563,7 +1698,8 @@ jQuery(document).ready(function($) {
                     if (currentIdx < allPages.length - 1) {
                         allPages[currentIdx + 1].scrollIntoView({ 
                             behavior: 'smooth', 
-                            block: 'start' 
+                            block: 'start',
+                            inline: 'nearest'
                         });
                     }
                 } else {
@@ -1594,6 +1730,8 @@ jQuery(document).ready(function($) {
                 if (isContinuousMode()) {
                     updateProgress();
                     updateLandscapeControls();
+                    preloadNextImages(continuousPageIndex());
+                    loadVisibleReaderImages();
                 } else {
                     // A paged reader has one visible page; scrolling within a wide image must not change it.
                     updateReaderTopBarVisibility();
@@ -1687,6 +1825,8 @@ jQuery(document).ready(function($) {
     // Initial setup
     if (pages.length > 0) {
         updatePageDisplay();
+        readerLayoutReady = true;
+        loadVisibleReaderImages();
     }
     
     // Recalculate responsive reader layout after orientation/viewport changes.
@@ -1697,12 +1837,13 @@ jQuery(document).ready(function($) {
             applyScale();
         }
         updateReaderTopBarVisibility();
+        loadVisibleReaderImages();
     });
 
     // The top bar also changes the reader height without a window resize.
     if ('ResizeObserver' in window) {
         const readerSizeObserver = new ResizeObserver(() => {
-            if (readingMode === 'paged') applyScale();
+            applyScale();
         });
         readerSizeObserver.observe(scrollContainer);
     }
