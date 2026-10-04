@@ -229,6 +229,8 @@ function manga_infer_chapter_from_filenames($files) {
         $parsed = manga_parse_chapter_title($stem);
         if ($parsed['chapter'] > 0 && $parsed['confidence'] === 'high') {
             $candidate = array('number' => $parsed['chapter'], 'confidence' => 'high', 'source' => 'filename_marker');
+        } elseif (($filename_group = manga_filename_chapter_group($stem)) !== '') {
+            $candidate = array('number' => (float) substr($filename_group, 1), 'confidence' => 'high', 'source' => 'filename_chapter_code');
         } else {
             // Typical scan names end in both chapter and page numbers: remove only the page token, then parse again.
             $normalized_stem = manga_normalize_chapter_text($stem);
