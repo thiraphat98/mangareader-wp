@@ -495,7 +495,7 @@ function render_chapter_connection_meta_box($post) {
     </div>
     <div style="margin-bottom: 15px;">
         <label style="display: block; font-weight: 600; margin-bottom: 5px;">Chapter Number:</label>
-        <input type="number" name="chapter_number" value="<?php echo esc_attr($chapter_number); ?>" step="0.1" style="width: 100%; padding: 8px;">
+        <input type="number" name="chapter_number" value="<?php echo esc_attr($chapter_number); ?>" step="any" style="width: 100%; padding: 8px;">
     </div>
     <?php
 }
@@ -2088,17 +2088,19 @@ function manga_auto_sync_library() {
             }
 
             // A renamed folder must not silently create a second chapter with the same number.
-            $number_conflict = false;
+            $number_conflict = 0;
             foreach ($known_chapter_ids as $known_id) {
                 $known_numbers = manga_chapter_numbers_for_post($known_id);
                 if ((float) $known_numbers['volume'] === (float) $numbers['volume'] &&
                     (float) $known_numbers['chapter'] === (float) $numbers['chapter']) {
-                    $number_conflict = true;
+                    $number_conflict = (int) $known_id;
                     break;
                 }
             }
             if ($number_conflict) {
-                $sync_errors[] = 'Chapter number already exists; review a possible folder rename: ' . $resolved_chapter['path'];
+                $sync_errors[] = 'Chapter ' . $numbers['chapter'] . ' conflicts with existing post #' . $number_conflict .
+                    ' (source: ' . (string) get_post_meta($number_conflict, 'imported_from_path', true) .
+                    '); review before importing: ' . $resolved_chapter['path'];
                 continue;
             }
 
@@ -2252,7 +2254,7 @@ function render_folder_import_page() {
         <p>Import manga chapters by linking directly to files in your manga folder. Images are not copied to the Media Library.</p>
         <p class="description"><strong>Automatic discovery is enabled.</strong> New manga folders and chapter folders are checked every 15 minutes by WordPress Cron.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
         <?php if (!empty($auto_sync_status['errors'])): ?>
-            <div class="notice notice-warning"><p>Automatic sync needs attention:</p><ul>
+            <div class="notice notice-warning"><p>Automatic sync needs attention (last run: <?php echo esc_html((string) ($auto_sync_status['last_run'] ?? 'unknown')); ?>):</p><ul>
                 <?php foreach ((array) $auto_sync_status['errors'] as $sync_error): ?>
                     <li><?php echo esc_html($sync_error); ?></li>
                 <?php endforeach; ?>
@@ -2602,8 +2604,8 @@ function manga_start_folder_import() {
         'fields' => 'ids',
         'meta_query' => array(
             array('key' => 'connected_manga_id', 'value' => $manga_id),
-            array('key' => 'volume_number', 'value' => $chapter_numbers['volume'], 'type' => 'DECIMAL'),
-            array('key' => 'chapter_number', 'value' => $chapter_numbers['chapter'], 'type' => 'DECIMAL'),
+            array('key' => 'volume_number', 'value' => $chapter_numbers['volume'], 'type' => 'DECIMAL(20,6)'),
+            array('key' => 'chapter_number', 'value' => $chapter_numbers['chapter'], 'type' => 'DECIMAL(20,6)'),
         ),
     ));
     if ($existing_by_number) {
@@ -2710,8 +2712,8 @@ function manga_process_folder_import_batch() {
         'fields' => 'ids',
         'meta_query' => array(
             array('key' => 'connected_manga_id', 'value' => $job['manga_id']),
-            array('key' => 'volume_number', 'value' => $job['volume_number'], 'type' => 'DECIMAL'),
-            array('key' => 'chapter_number', 'value' => $job['chapter_number'], 'type' => 'DECIMAL'),
+            array('key' => 'volume_number', 'value' => $job['volume_number'], 'type' => 'DECIMAL(20,6)'),
+            array('key' => 'chapter_number', 'value' => $job['chapter_number'], 'type' => 'DECIMAL(20,6)'),
         ),
     ));
     if ($number_conflict) {
