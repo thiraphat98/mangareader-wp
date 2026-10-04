@@ -117,18 +117,25 @@ function manga_parse_chapter_title($title) {
     $volume = 0;
     $chapter = 0;
 
-    if (preg_match('/(?:Vol(?:ume)?\.?|V)\s*(\d+(?:\.\d+)?)/iu', $title, $matches)) {
+    if (preg_match('/(?:^|[\\s\\[(])(?:Vol(?:ume)?[._-]*|V)\\s*(\\d+(?:\\.\\d+)?)/iu', $title, $matches)) {
         $volume = (float) $matches[1];
     }
 
-    if (preg_match('/(?:Ch(?:apter)?[. _-]*|Episode[. _-]*|ตอน[ _-]*(?:ที่)?[ _-]*)(\d+(?:\.\d+)?)/iu', $title, $matches)) {
+    // Explicit markers take precedence so unrelated numbers later in a title are ignored.
+    if (preg_match('/(?:^|[\\s\\[(])(?:Ch(?:apter)?|Ep(?:isode)?|#|ตอน(?:ที่)?|第)\\s*[._:#_-]*\\s*(\\d+(?:\\.\\d+)?)/iu', $title, $matches)) {
         $chapter = (float) $matches[1];
-    } elseif (preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)\d+(?:\.\d+)?\s+(\d+(?:\.\d+)?)$/iu', $title, $matches)) {
+    } elseif (preg_match('/^(?:Vol(?:ume)?[._-]*\\s*|V\\s*)\\d+(?:\\.\\d+)?\\s+(?:Ch(?:apter)?\\.?\\s*)?(\\d+(?:\\.\\d+)?)$/iu', $title, $matches)) {
         $chapter = (float) $matches[1];
-    } elseif (!preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)\d+(?:\.\d+)?$/iu', $title)
-        && preg_match('/^\s*(\d+(?:\.\d+)?)\s*$/u', $title, $matches)) {
+    } elseif ($volume <= 0 && preg_match('/^\\s*(\\d+(?:\\.\\d+)?)\\s*$/u', $title, $matches)) {
+        // Bare numeric folder names are accepted only when the entire label is numeric.
         $chapter = (float) $matches[1];
-    } elseif (preg_match('/(?:^|[\s_-])(\d+(?:\.\d+)?)\s*-\s*\d+(?:\.\d+)?\s*$/u', $title, $matches)) {
+    } elseif (preg_match('/^\\s*(\\d+(?:\\.\\d+)?)\\s*[-–—]\\s*(\\d+(?:\\.\\d+)?)\\s*$/u', $title, $matches)) {
+        // Accept the legacy "6 - 6" convention only when both sides agree.
+        if ((float) $matches[1] === (float) $matches[2]) {
+            $chapter = (float) $matches[1];
+        }
+    } elseif (preg_match('/^\\s*(\\d+(?:\\.\\d+)?)\\s*[-–—]\\s*[^0-9].*$/u', $title, $matches)) {
+        // Accept "6 - chapter title" without guessing from numbers later in the title.
         $chapter = (float) $matches[1];
     }
 
@@ -1504,7 +1511,29 @@ function manga_auto_sync_library() {
                         continue;
                     }
                 }
-                $sync_errors[] = 'Incomplete existing chapter record: ' . $resolved_chapter['path'];
+                // Repair only a verifiable record for this exact path, manga, and source group.
+                $existing_post = get_post($existing_id);
+                $existing_status = get_post_status($existing_id);
+                if ($existing_post && $existing_post->post_type === 'chapter' &&
+                    (int) get_post_meta($existing_id, 'connected_manga_id', true) === (int) $manga_id &&
+                    in_array($existing_status, array('draft', 'publish'), true)) {
+                    $image_repair = manga_sync_imported_chapter_images($existing_id, $resolved_chapter['path'], $source_group);
+                    if (!is_wp_error($image_repair) &&
+                        manga_imported_chapter_valid($existing_id, $resolved_chapter['path'], $manga_id, $source_group)) {
+                        if ($existing_status === 'draft') {
+                            $published = wp_update_post(array('ID' => $existing_id, 'post_status' => 'publish'), true);
+                            if (is_wp_error($published) || !$published || get_post_status($existing_id) !== 'publish') {
+                                $sync_errors[] = 'Chapter images were repaired, but publishing failed: ' . $resolved_chapter['path'];
+                                continue;
+                            }
+                        }
+                        mark_chapter_as_imported($resolved_chapter['path']);
+                        continue;
+                    }
+                    $sync_errors[] = (is_wp_error($image_repair) ? $image_repair->get_error_message() : 'Existing chapter still failed validation.') . ' ' . $resolved_chapter['path'];
+                    continue;
+                }
+                $sync_errors[] = 'Incomplete existing chapter record (identity/status mismatch; left unchanged): ' . $resolved_chapter['path'];
                 continue;
             }
 
@@ -1943,7 +1972,7 @@ function manga_start_folder_import() {
     $chapter_label = trim($volume_label . $resolved['chapter_name']);
     $chapter_numbers = manga_parse_chapter_title($chapter_label);
     if ($chapter_numbers['chapter'] <= 0) {
-        wp_send_json_error(array('message' => 'Chapter number not recognized. Use Ch. 10, Chapter 10, ตอนที่ 10, or 10 - 10 in the folder name.'));
+        wp_send_json_error(array('message' => 'Chapter number not recognized. Use Ch. 10, Chapter 10, Ep. 10, ตอนที่ 10, 10, 10 - 10, or 10 - a chapter title in the folder name.'));
     }
 
     $manga_id = manga_find_or_create_from_folder($resolved['series_path']);
