@@ -625,6 +625,7 @@ function render_chapter_images_meta_box($post) {
         <p><strong>Option 1: Upload Images</strong></p>
         <button type="button" id="upload-images-btn" class="button button-primary">Select Images</button>
         <input type="file" id="image-files" multiple accept="image/*" style="display:none">
+        <span id="chapter-upload-status" role="status" aria-live="polite"></span>
         <div id="image-preview" class="image-preview-container">
             <?php 
             if (!empty($image_links)) {
@@ -652,16 +653,35 @@ function render_chapter_images_meta_box($post) {
     
     <script>
     jQuery(document).ready(function($) {
+        var uploadInProgress = false;
+        var uploadFailures = [];
+        function setUploadBusy(busy) {
+            uploadInProgress = busy;
+            $('#upload-images-btn, #publish, #save-post').prop('disabled', busy);
+            $('#chapter-upload-status').text(busy ? 'Uploading images. Keep this page open; saving is paused.' :
+                (uploadFailures.length ? 'Some images failed: ' + uploadFailures.join(', ') + '. Review the pages before saving.' : 'Upload complete. Review the pages before saving.'));
+        }
+        $('#post').on('submit', function(event) {
+            if (uploadInProgress) {
+                event.preventDefault();
+                alert('Wait for the image upload to finish before saving this chapter.');
+            }
+        });
         $('#upload-images-btn').on('click', function() {
+            if (uploadInProgress) return;
             $('#image-files').trigger('click');
         });
         
         $('#image-files').on('change', function(e) {
             var files = Array.prototype.slice.call(e.target.files || []);
+            if (!files.length || uploadInProgress) return;
+            uploadFailures = [];
+            setUploadBusy(true);
             var batchSize = 8;
             var uploadBatch = function(offset) {
                 if (offset >= files.length) {
                     updateImageLinksField();
+                    setUploadBusy(false);
                     return;
                 }
                 var formData = new FormData();
@@ -678,17 +698,21 @@ function render_chapter_images_meta_box($post) {
                                 addImageToPreview(image.url, image.id);
                             });
                             if (response.data.failed && response.data.failed.length) {
-                                alert('Some files could not be uploaded: ' + response.data.failed.join(', '));
+                                uploadFailures = uploadFailures.concat(response.data.failed);
                             }
                             uploadBatch(offset + batchSize);
                         } else {
                             var message = response.data && response.data.message ? response.data.message : 'Unknown error';
                             alert('Upload failed: ' + message);
                             updateImageLinksField();
+                            uploadFailures.push(message);
+                            setUploadBusy(false);
                         }
                     }).fail(function() {
                         alert('Upload request failed. Please retry the remaining images.');
                         updateImageLinksField();
+                        uploadFailures.push('Request failed; remaining images were not uploaded');
+                        setUploadBusy(false);
                     });
             };
             uploadBatch(0);
