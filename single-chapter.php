@@ -1028,23 +1028,35 @@ jQuery(document).ready(function($) {
     const resetZoomBtn = document.getElementById('resetZoomBtn');
     const zoomLevelDisplay = document.getElementById('zoomLevelDisplay');
     const scrollContainer = document.getElementById('readerMainContent');
-    const deferredReaderImages = document.querySelectorAll('.reader-page img[data-src]');
-    if ('IntersectionObserver' in window) {
-        const readerImageObserver = new IntersectionObserver((entries, observer) => {
+    let readerImageObserver = null;
+    function loadReaderImage(index, highPriority = false) {
+        const image = pages[index]?.querySelector('img[data-src]');
+        if (!image?.dataset.src) return;
+        const source = image.dataset.src;
+        image.setAttribute('fetchpriority', highPriority ? 'high' : 'low');
+        image.loading = 'eager';
+        image.removeAttribute('data-src');
+        image.src = source;
+        readerImageObserver?.unobserve(image);
+    }
+
+    // Fetch the active image and exactly the next two images, even when pages are hidden.
+    function preloadNextImages(index) {
+        if (!totalPages || !Number.isFinite(index)) return;
+        const first = Math.max(0, Math.min(totalPages - 1, Math.trunc(index)));
+        for (let offset = 0; offset <= 2 && first + offset < totalPages; offset++) {
+            loadReaderImage(first + offset, offset === 0);
+        }
+    }
+
+    // Fast scrolling may expose a page before the scroll handler runs.
+    if (typeof window.IntersectionObserver === 'function') {
+        readerImageObserver = new IntersectionObserver(entries => {
             entries.forEach(entry => {
-                if (!entry.isIntersecting) return;
-                const image = entry.target;
-                image.src = image.dataset.src;
-                image.removeAttribute('data-src');
-                observer.unobserve(image);
+                if (entry.isIntersecting) loadReaderImage(Number(entry.target.dataset.pageIndex), true);
             });
-        }, { root: scrollContainer, rootMargin: '800px 0px', threshold: 0.01 });
-        deferredReaderImages.forEach(image => readerImageObserver.observe(image));
-    } else {
-        deferredReaderImages.forEach(image => {
-            image.src = image.dataset.src;
-            image.removeAttribute('data-src');
-        });
+        }, { root: scrollContainer, rootMargin: '0px', threshold: 0.01 });
+        document.querySelectorAll('.reader-page img[data-src]').forEach(image => readerImageObserver.observe(image));
     }
     
     // State
@@ -1348,6 +1360,7 @@ jQuery(document).ready(function($) {
                 pages[currentPage].scrollIntoView({ behavior: 'instant', block: 'start' });
             }
         }
+        preloadNextImages(isContinuousMode() ? continuousPageIndex() : currentPage);
         applyScale();
     }
     
@@ -1633,6 +1646,7 @@ jQuery(document).ready(function($) {
                 if (isContinuousMode()) {
                     updateProgress();
                     updateLandscapeControls();
+                    preloadNextImages(continuousPageIndex());
                 } else {
                     // A paged reader has one visible page; scrolling within a wide image must not change it.
                     updateReaderTopBarVisibility();
