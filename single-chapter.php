@@ -48,7 +48,7 @@
                 <span>Back</span>
             </a>
             <div class="chapter-info-compact">
-                <span class="compact-title"><?php echo esc_html($manga_title); ?></span>
+                <span class="compact-title" title="<?php echo esc_attr($manga_title); ?>"><?php echo esc_html($manga_title); ?></span>
                 <span class="compact-chapter"><?php echo esc_html($display_chapter_text); ?></span>
             </div>
         </div>
@@ -495,13 +495,46 @@
    ============================================ */
 .reader-top-bar {
     padding: 12px 24px;
-    display: flex;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    column-gap: 12px;
     align-items: center;
     z-index: 101;
     max-height: 80px;
     overflow: hidden;
     transition: max-height 0.3s ease, padding 0.3s ease, opacity 0.2s ease, transform 0.3s ease;
+}
+
+.reader-top-bar-left {
+    min-width: 0;
+    overflow: hidden;
+}
+
+#backToMangaBtn {
+    flex: none;
+}
+
+.reader-top-bar-center {
+    min-width: 0;
+    justify-self: center;
+}
+
+.reader-top-bar-right {
+    justify-self: end;
+}
+
+.chapter-info-compact {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+}
+
+.compact-title,
+.compact-chapter {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .reader-top-bar.is-hidden {
@@ -891,9 +924,16 @@
 }
 
 /* Responsive */
+@media (max-width: 900px) {
+    .chapter-info-compact {
+        display: none;
+    }
+}
+
 @media (max-width: 768px) {
     .reader-top-bar {
         padding: 10px 16px;
+        column-gap: 8px;
     }
 
     .reader-top-bar .chapter-nav {
@@ -946,9 +986,10 @@
     }
 }
 
-@media (max-width: 480px) {
+@media (max-width: 640px) {
     .reader-top-bar {
-        flex-wrap: wrap;
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas: "left right" "center center";
         gap: 4px;
         padding: 6px 8px;
         max-height: 108px;
@@ -958,20 +999,24 @@
         max-height: 0;
     }
 
-    .reader-top-bar-left,
+    .reader-top-bar-left {
+        grid-area: left;
+    }
+
     .reader-top-bar-right {
-        gap: 4px;
+        grid-area: right;
     }
 
     .reader-top-bar-center {
-        order: 3;
-        flex: 0 0 100%;
+        grid-area: center;
+        width: 100%;
         justify-content: center;
         min-width: 0;
     }
 
     .chapter-nav {
         gap: 4px;
+        max-width: 100%;
     }
 
     .chapter-nav .reader-nav-btn {
@@ -1176,7 +1221,7 @@ jQuery(document).ready(function($) {
             }
         });
     }
-    
+
     function updateLandscapeControls() {
         let visibleLandscape = false;
         if (isContinuousMode()) {
@@ -1340,6 +1385,7 @@ jQuery(document).ready(function($) {
         updateLandscapeLayout();
         updateReaderImageLayout(scaleValue);
         restoreReadingAnchor(readingAnchor);
+        updateProgressBar();
         if (readerLayoutReady) loadVisibleReaderImages();
     }
     
@@ -1381,19 +1427,40 @@ jQuery(document).ready(function($) {
         applyScale();
     }
     
-    // Update progress bar
-    function updateProgress() {
-        if (isContinuousMode() && scrollContainer) {
-            const scrollTop = scrollContainer.scrollTop;
-            const scrollHeight = scrollContainer.scrollHeight - scrollContainer.clientHeight;
-            if (scrollHeight > 0) {
-                const progress = (scrollTop / scrollHeight) * 100;
-                if (progressFill) progressFill.style.width = progress + '%';
+    // Base continuous progress on the visible page, not the changing height of deferred pages.
+    function updateProgressBar() {
+        if (!progressFill || !totalPages) return;
+        let progress;
+        if (isContinuousMode()) {
+            const maxScroll = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+            const viewport = scrollContainer.getBoundingClientRect();
+            const lastPage = pages[totalPages - 1];
+            const lastPageEnd = lastPage.classList.contains('has-loaded-image')
+                && lastPage.getBoundingClientRect().bottom <= viewport.bottom + 3;
+            if (maxScroll <= 1 || lastPageEnd) {
+                progress = 100;
+            } else if (scrollContainer.scrollTop <= 1) {
+                progress = 0;
+            } else {
+                const readingLine = viewport.top + viewport.height / 2;
+                let index = 0;
+                pages.forEach((page, pageIndex) => {
+                    if (page.getBoundingClientRect().top <= readingLine) index = pageIndex;
+                });
+                const pageBounds = pages[index].getBoundingClientRect();
+                const pageFraction = pageBounds.height > 0
+                    ? Math.max(0, Math.min(1, (readingLine - pageBounds.top) / pageBounds.height))
+                    : 0;
+                progress = ((index + pageFraction) / totalPages) * 100;
             }
-        } else if (totalPages > 0) {
-            const progress = ((currentPage + 1) / totalPages) * 100;
-            if (progressFill) progressFill.style.width = progress + '%';
+        } else {
+            progress = ((currentPage + 1) / totalPages) * 100;
         }
+        progressFill.style.width = Math.max(0, Math.min(100, progress)) + '%';
+    }
+
+    function updateProgress() {
+        updateProgressBar();
         updateReaderTopBarVisibility();
     }
     
@@ -1418,7 +1485,7 @@ jQuery(document).ready(function($) {
         }
     }
     
-    // Navigate to previous page (Paged mode only)
+    // Navigate to the previous page or image.
     function prevPage() {
         if (isContinuousMode()) {
             const previous = pages[continuousPageIndex() - 1];
@@ -1431,7 +1498,7 @@ jQuery(document).ready(function($) {
             updatePageDisplay();
         }
     }
-    
+
     function continuousPageIndex() {
         const top = scrollContainer.getBoundingClientRect().top + 2;
         let index = 0;
@@ -1440,7 +1507,7 @@ jQuery(document).ready(function($) {
         });
         return index;
     }
-
+    
     // LONG STRIP MODE: Navigate to next image when clicking
     function longStripNextImage(clickedPage) {
         if (!isContinuousMode()) return;
@@ -1797,3 +1864,4 @@ window.addEventListener('beforeunload', function() {
 <?php endwhile; ?>
 
 <?php get_footer(); ?>
+
