@@ -23,7 +23,6 @@ for (const filename of fs.readdirSync(themeDir).filter((name) => name.endsWith('
 console.log('PASS: PHP 8.3 syntax for all top-level theme files');
 
 const source = fs.readFileSync(new URL('../functions.php', import.meta.url), 'utf8');
-assert.equal((source.match(/'type' => 'DECIMAL\(20,6\)'/g) || []).length, 4);
 assert.doesNotMatch(source, /'type' => 'DECIMAL'/);
 const ast = new Parser.Engine({ ast: { withPositions: true } }).parseCode(source);
 const names = [
@@ -33,7 +32,7 @@ const names = [
   'manga_source_exclusion_key', 'manga_remember_deleted_import',
   'manga_sync_imported_chapter_images', 'manga_relink_renamed_chapter',
   'manga_normalize_chapter_text', 'manga_parse_chapter_title',
-  'manga_chapter_numbers_for_post',
+  'manga_chapter_numbers_for_post', 'manga_find_chapter_number_conflict',
   'manga_sort_chapter_posts',
 ];
 const functions = names.map((name) => {
@@ -83,6 +82,17 @@ $sorted_fractional_posts = manga_sort_chapter_posts(array(
     (object) array('ID' => 11), (object) array('ID' => 13),
 ));
 $sorted_fractional_ids = array_map(function($post) { return $post->ID; }, $sorted_fractional_posts);
+$titles[21] = 'Series - ตอนที่ 65.5';
+$titles[22] = 'Series - ตอนที่ 66';
+$titles[23] = 'Series - ตอนที่ 75.5';
+$titles[24] = 'Series - ตอนที่ 76';
+$queryCandidates = array(21, 22, 23, 24);
+$fractional_conflicts = array_map(function($number) {
+    return manga_find_chapter_number_conflict(7, array('volume' => 0, 'chapter' => $number));
+}, array(65.5, 66, 75.5, 76, 65.6));
+$legacy_title_conflict = manga_find_chapter_number_conflict(7, array('volume' => 0, 'chapter' => 65.5), array(21));
+$different_volume_conflict = manga_find_chapter_number_conflict(7, array('volume' => 1, 'chapter' => 65.5), array(21));
+$queryCandidates = array(1);
 update_post_meta(1, 'imported_from_path', '/test/series/chapter');
 update_post_meta(1, 'image_links', "https://example.test/manga/01.jpg\\nhttps://example.test/manga/02.jpg");
 file_put_contents('/test/series/chapter/01.jpg', 'one');
@@ -121,9 +131,11 @@ $audit_renamed = manga_audit_imported_sources();
 $warning_type_renamed = get_post_meta(1, '_manga_source_health');
 update_post_meta(1, 'image_links', 'https://example.test/manga/series/chapter/page01.png');
 $relink_ambiguous = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1, 2));
+$relink_ambiguous_diagnostic = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1, 2), true);
 $saved_relink_links = get_post_meta(1, 'image_links');
 update_post_meta(1, 'image_links', 'https://example.test/manga/series/chapter/other.png');
 $relink_wrong_pages = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1));
+$relink_wrong_pages_diagnostic = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1), true);
 update_post_meta(1, 'image_links', $saved_relink_links);
 $relink_waiting = manga_relink_renamed_chapter('/test/series/ตอนที่1', '', array('volume' => 0, 'chapter' => 1), array(1));
 $relink_key = 'manga_new_source_' . md5('/test/series/ตอนที่1|');
@@ -139,7 +151,7 @@ $posts[5] = (object) array('post_type' => 'manga');
 update_post_meta(5, '_manga_source_path', '/test/series');
 manga_remember_deleted_import(5);
 $series_excluded = get_option(manga_source_exclusion_key('series', '/test/series')) > 0;
-echo json_encode(compact('thai_number', 'fractional_numbers', 'sorted_fractional_ids', 'partial', 'complete', 'missing', 'no_cover', 'cover_first', 'cover_second', 'cover_removed', 'manual_cover', 'stable_first', 'stable_second', 'stable_after_wait', 'audit_missing', 'warning_count', 'warning_type_empty', 'audit_restored', 'warning_cleared', 'audit_renamed', 'warning_type_renamed', 'relink_ambiguous', 'relink_wrong_pages', 'relink_waiting', 'relinked', 'relinked_path', 'relinked_links', 'chapter_excluded', 'series_excluded'));
+echo json_encode(compact('thai_number', 'fractional_numbers', 'sorted_fractional_ids', 'fractional_conflicts', 'legacy_title_conflict', 'different_volume_conflict', 'partial', 'complete', 'missing', 'no_cover', 'cover_first', 'cover_second', 'cover_removed', 'manual_cover', 'stable_first', 'stable_second', 'stable_after_wait', 'audit_missing', 'warning_count', 'warning_type_empty', 'audit_restored', 'warning_cleared', 'audit_renamed', 'warning_type_renamed', 'relink_ambiguous', 'relink_ambiguous_diagnostic', 'relink_wrong_pages', 'relink_wrong_pages_diagnostic', 'relink_waiting', 'relinked', 'relinked_path', 'relinked_links', 'chapter_excluded', 'series_excluded'));
 `;
 const result = await php.run({ code: fixture });
 assert.equal(result.errors, '', result.errors);
@@ -148,6 +160,9 @@ assert.equal(value.thai_number.chapter, 1);
 assert.equal(value.thai_number.confidence, 'high');
 assert.deepEqual(value.fractional_numbers, [1, 1.1, 1.2, 2, 65.5, 66, 75.5, 76]);
 assert.deepEqual(value.sorted_fractional_ids, [14, 13, 12, 11]);
+assert.deepEqual(value.fractional_conflicts, [21, 22, 23, 24, 0]);
+assert.equal(value.legacy_title_conflict, 21);
+assert.equal(value.different_volume_conflict, 0);
 assert.deepEqual(value.partial, []);
 assert.equal(value.complete.length, 2);
 assert.deepEqual(value.missing, []);
@@ -166,7 +181,9 @@ assert.equal(value.warning_cleared, '');
 assert.equal(value.audit_renamed.missing, 1);
 assert.equal(value.warning_type_renamed, 'folder_unavailable');
 assert.equal(value.relink_ambiguous, false);
+assert.equal(value.relink_ambiguous_diagnostic.code, 'manga_relink_ambiguous');
 assert.equal(value.relink_wrong_pages, false);
+assert.equal(value.relink_wrong_pages_diagnostic.code, 'manga_relink_page_names');
 assert.equal(value.relink_waiting.code, 'manga_relink_waiting');
 assert.equal(value.relinked, true);
 assert.equal(value.relinked_path, '/test/series/ตอนที่1');

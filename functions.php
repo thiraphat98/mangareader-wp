@@ -287,6 +287,29 @@ function manga_chapter_numbers_for_post($chapter_id) {
     );
 }
 
+/** Compare stored chapter metadata and legacy titles using the same precision in every importer. */
+function manga_find_chapter_number_conflict($manga_id, $numbers, $known_chapter_ids = null) {
+    if ($known_chapter_ids === null) {
+        $known_chapter_ids = get_posts(array(
+            'post_type' => 'chapter',
+            'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+            'meta_query' => array(array('key' => 'connected_manga_id', 'value' => (int) $manga_id)),
+        ));
+    }
+    $target_volume = sprintf('%.6F', (float) $numbers['volume']);
+    $target_chapter = sprintf('%.6F', (float) $numbers['chapter']);
+    foreach ($known_chapter_ids as $chapter_id) {
+        $saved = manga_chapter_numbers_for_post($chapter_id);
+        if (sprintf('%.6F', (float) $saved['volume']) === $target_volume &&
+            sprintf('%.6F', (float) $saved['chapter']) === $target_chapter) {
+            return (int) $chapter_id;
+        }
+    }
+    return 0;
+}
+
 function manga_chapter_display_label($chapter_id) {
     $numbers = manga_chapter_numbers_for_post($chapter_id);
     if ($numbers['volume'] > 0 && $numbers['chapter'] <= 0) {
@@ -1776,7 +1799,7 @@ function manga_new_source_stable($source_path, $source_group, $files) {
 }
 
 /** Only relink an unambiguous rename with the same page names and chapter number. */
-function manga_relink_renamed_chapter($new_path, $source_group, $numbers, $known_chapter_ids) {
+function manga_relink_renamed_chapter($new_path, $source_group, $numbers, $known_chapter_ids, $diagnostic = false) {
     $candidate_ids = array();
     foreach ($known_chapter_ids as $id) {
         if (!in_array(get_post_status($id), array('publish', 'draft'), true)) {
@@ -1787,7 +1810,8 @@ function manga_relink_renamed_chapter($new_path, $source_group, $numbers, $known
             (float) $saved_numbers['chapter'] === (float) $numbers['chapter']) {
             $candidate_ids[] = $id;
             if (count($candidate_ids) > 1) {
-                return false;
+                return $diagnostic ? new WP_Error('manga_relink_ambiguous',
+                    'Multiple existing posts have this chapter number; review posts #' . implode(', #', $candidate_ids) . ': ' . $new_path) : false;
             }
         }
     }
@@ -1799,21 +1823,25 @@ function manga_relink_renamed_chapter($new_path, $source_group, $numbers, $known
     if ($old_path === '' || is_dir($old_path) ||
         get_post_meta($chapter_id, '_manga_manual_override', true) ||
         (string) get_post_meta($chapter_id, '_manga_source_group', true) !== $source_group) {
-        return false;
+        return $diagnostic ? new WP_Error('manga_relink_source_mismatch',
+            'Chapter #' . $chapter_id . ' has the same number, but its saved source is still present, manually overridden, or uses a different image group. Review before importing: ' . $new_path) : false;
     }
     $old_links = get_post_meta($chapter_id, 'image_links', true);
     $files = manga_imported_source_files($new_path, $source_group);
     if (!is_string($old_links) || !$files) {
-        return false;
+        return $diagnostic ? new WP_Error('manga_relink_images_unverified',
+            'Chapter #' . $chapter_id . ' cannot be relinked because its saved or new image list is empty: ' . $new_path) : false;
     }
     $saved_urls = array_values(array_filter(preg_split('/\r\n|\r|\n/', $old_links), 'strlen'));
     if (count($saved_urls) !== count($files)) {
-        return false;
+        return $diagnostic ? new WP_Error('manga_relink_page_count',
+            'Chapter #' . $chapter_id . ' has ' . count($saved_urls) . ' saved pages, but the new folder has ' . count($files) . '. Review the rename: ' . $new_path) : false;
     }
     foreach ($files as $index => $file) {
         $saved_path = wp_parse_url(trim($saved_urls[$index]), PHP_URL_PATH);
         if (!$saved_path || rawurldecode(basename($saved_path)) !== basename($file)) {
-            return false;
+            return $diagnostic ? new WP_Error('manga_relink_page_names',
+                'Chapter #' . $chapter_id . ' has different page filenames at page ' . ($index + 1) . '. Review the rename: ' . $new_path) : false;
         }
     }
     if (!manga_new_source_stable($new_path, $source_group, $files)) {
@@ -1888,6 +1916,9 @@ function manga_auto_sync_library() {
     $cursor = get_option('manga_auto_sync_cursor', array('series' => 0, 'chapter' => 0));
     $cursor_series = max(0, (int) ($cursor['series'] ?? 0));
     $cursor_chapter = max(0, (int) ($cursor['chapter'] ?? 0));
+    $previous_status = ($cursor_series || $cursor_chapter)
+        ? get_option('manga_auto_sync_status', array()) : array();
+    $previous_errors = is_array($previous_status) ? (array) ($previous_status['errors'] ?? array()) : array();
     $next_cursor = array('series' => 0, 'chapter' => 0);
 
     foreach ((array) $series_folders as $series_index => $series_folder) {
@@ -2064,7 +2095,7 @@ function manga_auto_sync_library() {
                 ));
             }
 
-            $relinked = manga_relink_renamed_chapter($resolved_chapter['path'], $source_group, $numbers, $known_chapter_ids);
+            $relinked = manga_relink_renamed_chapter($resolved_chapter['path'], $source_group, $numbers, $known_chapter_ids, true);
             if (is_wp_error($relinked)) {
                 $sync_errors[] = $relinked->get_error_message();
                 continue;
@@ -2088,15 +2119,7 @@ function manga_auto_sync_library() {
             }
 
             // A renamed folder must not silently create a second chapter with the same number.
-            $number_conflict = 0;
-            foreach ($known_chapter_ids as $known_id) {
-                $known_numbers = manga_chapter_numbers_for_post($known_id);
-                if ((float) $known_numbers['volume'] === (float) $numbers['volume'] &&
-                    (float) $known_numbers['chapter'] === (float) $numbers['chapter']) {
-                    $number_conflict = (int) $known_id;
-                    break;
-                }
-            }
+            $number_conflict = manga_find_chapter_number_conflict($manga_id, $numbers, $known_chapter_ids);
             if ($number_conflict) {
                 $sync_errors[] = 'Chapter ' . $numbers['chapter'] . ' conflicts with existing post #' . $number_conflict .
                     ' (source: ' . (string) get_post_meta($number_conflict, 'imported_from_path', true) .
@@ -2179,7 +2202,8 @@ function manga_auto_sync_library() {
         'chapters_repaired' => $repaired_chapters,
         'continued' => $continue_sync,
         'source_audit' => $source_audit ?? array(),
-        'errors' => array_slice($sync_errors, 0, 20),
+        'errors' => array_slice(array_merge($previous_errors, $sync_errors), 0, 20),
+        'errors_truncated' => !empty($previous_status['errors_truncated']) || count($previous_errors) + count($sync_errors) > 20,
     ), false);
 
     if ($continue_sync && !wp_next_scheduled('manga_auto_sync_continue')) {
@@ -2254,10 +2278,11 @@ function render_folder_import_page() {
         <p>Import manga chapters by linking directly to files in your manga folder. Images are not copied to the Media Library.</p>
         <p class="description"><strong>Automatic discovery is enabled.</strong> New manga folders and chapter folders are checked every 15 minutes by WordPress Cron.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
         <?php if (!empty($auto_sync_status['errors'])): ?>
-            <div class="notice notice-warning"><p>Automatic sync needs attention (last run: <?php echo esc_html((string) ($auto_sync_status['last_run'] ?? 'unknown')); ?>):</p><ul>
+            <div class="notice notice-warning"><p>Automatic sync needs attention (last run: <?php echo esc_html((string) ($auto_sync_status['last_run'] ?? 'unknown')); ?><?php echo !empty($auto_sync_status['continued']) ? '; scan in progress' : '; scan complete'; ?>):</p><ul>
                 <?php foreach ((array) $auto_sync_status['errors'] as $sync_error): ?>
                     <li><?php echo esc_html($sync_error); ?></li>
                 <?php endforeach; ?>
+                <?php if (!empty($auto_sync_status['errors_truncated'])): ?><li>More sync warnings exist; the first 20 are shown.</li><?php endif; ?>
             </ul></div>
         <?php endif; ?>
         <?php if ($missing_chapters): ?>
@@ -2597,17 +2622,7 @@ function manga_start_folder_import() {
     if ($existing_by_title) {
         wp_send_json_error(array('message' => 'A chapter with this manga and chapter number already exists.'));
     }
-    $existing_by_number = get_posts(array(
-        'post_type' => 'chapter',
-        'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
-        'posts_per_page' => 1,
-        'fields' => 'ids',
-        'meta_query' => array(
-            array('key' => 'connected_manga_id', 'value' => $manga_id),
-            array('key' => 'volume_number', 'value' => $chapter_numbers['volume'], 'type' => 'DECIMAL(20,6)'),
-            array('key' => 'chapter_number', 'value' => $chapter_numbers['chapter'], 'type' => 'DECIMAL(20,6)'),
-        ),
-    ));
+    $existing_by_number = manga_find_chapter_number_conflict($manga_id, $chapter_numbers);
     if ($existing_by_number) {
         wp_send_json_error(array('message' => 'This manga already has that chapter number. Review a possible folder rename.'));
     }
@@ -2705,16 +2720,9 @@ function manga_process_folder_import_batch() {
         delete_transient($transient_key);
         wp_send_json_error(array('message' => 'The chapter or manga changed during import. Nothing new was published.'));
     }
-    $number_conflict = get_posts(array(
-        'post_type' => 'chapter',
-        'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
-        'posts_per_page' => 1,
-        'fields' => 'ids',
-        'meta_query' => array(
-            array('key' => 'connected_manga_id', 'value' => $job['manga_id']),
-            array('key' => 'volume_number', 'value' => $job['volume_number'], 'type' => 'DECIMAL(20,6)'),
-            array('key' => 'chapter_number', 'value' => $job['chapter_number'], 'type' => 'DECIMAL(20,6)'),
-        ),
+    $number_conflict = manga_find_chapter_number_conflict($job['manga_id'], array(
+        'volume' => $job['volume_number'],
+        'chapter' => $job['chapter_number'],
     ));
     if ($number_conflict) {
         delete_option($chapter_lock);
