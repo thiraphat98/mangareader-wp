@@ -112,34 +112,167 @@ function extract_chapter_number($title) {
 }
 
 /** Parse supported chapter and volume naming styles from imported folder names. */
+function manga_normalize_chapter_text($value) {
+    $value = trim((string) $value);
+    if (class_exists('Normalizer')) {
+        $normalized = Normalizer::normalize($value, Normalizer::FORM_KC);
+        if (is_string($normalized)) {
+            $value = $normalized;
+        }
+    }
+
+    $digit_sets = array(
+        '٠١٢٣٤٥٦٧٨٩', // Arabic-Indic
+        '۰۱۲۳۴۵۶۷۸۹', // Eastern Arabic/Persian
+        '０１２３４５６７８９', // Full-width
+        '०१२३४५६७८९', // Devanagari
+        '০১২৩৪৫৬৭৮৯', // Bengali
+        '๐๑๒๓๔๕๖๗๘๙', // Thai
+    );
+    $ascii_digits = str_split('0123456789');
+    foreach ($digit_sets as $digit_set) {
+        $digits = preg_split('//u', $digit_set, -1, PREG_SPLIT_NO_EMPTY);
+        if (is_array($digits) && count($digits) === 10) {
+            $value = strtr($value, array_combine($digits, $ascii_digits));
+        }
+    }
+
+    return trim(strtr($value, array(
+        '−' => '-',
+        '–' => '-',
+        '—' => '-',
+        '－' => '-',
+        '．' => '.',
+        '＿' => '_',
+        "\u{200B}" => '',
+        "\u{FEFF}" => '',
+    )));
+}
+
+/** Return chapter/volume candidates with confidence and evidence for safe import decisions. */
 function manga_parse_chapter_title($title) {
-    $title = trim((string) $title);
+    $title = manga_normalize_chapter_text($title);
     $volume = 0;
     $chapter = 0;
+    $confidence = 'none';
+    $source = '';
+    $ambiguous = false;
 
-    if (preg_match('/(?:^|[\\s\\[(])(?:Vol(?:ume)?[._-]*|V)\\s*(\\d+(?:\\.\\d+)?)/iu', $title, $matches)) {
+    if (preg_match('/(?:^|[\s\[(])(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*(\d+(?:\.\d+)?)/iu', $title, $matches)) {
         $volume = (float) $matches[1];
     }
 
-    // Explicit markers take precedence so unrelated numbers later in a title are ignored.
-    if (preg_match('/(?:^|[\\s\\[(])(?:Ch(?:apter)?|Ep(?:isode)?|#|ตอน(?:ที่)?|第)\\s*[._:#_-]*\\s*(\\d+(?:\\.\\d+)?)/iu', $title, $matches)) {
+    // Language labels are hints, not requirements: the numeric-position rules below are language-neutral.
+    $chapter_markers = 'Ch(?:apter)?|Ep(?:isode)?|Cap[ií]tulo|Cap(?:itolo)?|Chap(?:itre)?|Chương|Chuong|Bab|Hoofdstuk|Kapitel|Глава|Гл\\.?|فصل|अध्याय|অধ্যায়|ตอน(?:ที่)?|第|제|No\\.?|N°|№';
+    if (preg_match('/(?:^|[\s\[(])(?:' . $chapter_markers . ')[\s._:#-]*(\d+(?:\.\d+)?)/iu', $title, $matches)) {
         $chapter = (float) $matches[1];
-    } elseif (preg_match('/^(?:Vol(?:ume)?[._-]*\\s*|V\\s*)\\d+(?:\\.\\d+)?\\s+(?:Ch(?:apter)?\\.?\\s*)?(\\d+(?:\\.\\d+)?)$/iu', $title, $matches)) {
+        $confidence = 'high';
+        $source = 'chapter_marker';
+    } elseif (preg_match('/(\d+(?:\.\d+)?)\s*(?:화|話|章|回)(?=$|[\s._-]|\(|\[)/u', $title, $matches)) {
         $chapter = (float) $matches[1];
-    } elseif ($volume <= 0 && preg_match('/^\\s*(\\d+(?:\\.\\d+)?)\\s*$/u', $title, $matches)) {
-        // Bare numeric folder names are accepted only when the entire label is numeric.
+        $confidence = 'high';
+        $source = 'chapter_suffix_marker';
+    } elseif (preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*(\d+(?:\.\d+)?)[\s._-]+(?:Ch(?:apter)?[\s._-]*)?(\d+(?:\.\d+)?)$/iu', $title, $matches)) {
+        $volume = (float) $matches[1];
+        $chapter = (float) $matches[2];
+        $confidence = 'high';
+        $source = 'volume_and_chapter_numbers';
+    } elseif (preg_match('/^\s*(?:\[(?=[^\]]{1,80}\])(?=[^\]]*[^\d])[^\]]+\]\s*)*[\[(]?\s*(\d+(?:\.\d+)?)(?!\s*[-_]\s*\d)\s*[\])]?(?=$|[\s._-])/u', $title, $matches)) {
         $chapter = (float) $matches[1];
-    } elseif (preg_match('/^\\s*(\\d+(?:\\.\\d+)?)\\s*[-–—]\\s*(\\d+(?:\\.\\d+)?)\\s*$/u', $title, $matches)) {
-        // Accept the legacy "6 - 6" convention only when both sides agree.
+        $confidence = 'high';
+        $source = 'leading_number';
+    } elseif (preg_match('/^\s*(\d+(?:\.\d+)?)\s*[-_]\s*(\d+(?:\.\d+)?)\s*$/u', $title, $matches)) {
         if ((float) $matches[1] === (float) $matches[2]) {
             $chapter = (float) $matches[1];
+            $confidence = 'high';
+            $source = 'repeated_chapter_number';
+        } else {
+            $ambiguous = true;
+            $source = 'conflicting_number_pair';
         }
-    } elseif (preg_match('/^\\s*(\\d+(?:\\.\\d+)?)\\s*[-–—]\\s*[^0-9].*$/u', $title, $matches)) {
-        // Accept "6 - chapter title" without guessing from numbers later in the title.
-        $chapter = (float) $matches[1];
+    } elseif ($volume > 0 && preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*\d+(?:\.\d+)?$/iu', $title)) {
+        $source = 'volume_only';
+    } else {
+        $without_release_tags = preg_replace('/^\s*(?:\[[^\]]{1,80}\]\s*)+/', '', $title);
+        preg_match_all('/\d+(?:\.\d+)?/u', (string) $without_release_tags, $numeric_tokens);
+        if (count($numeric_tokens[0] ?? array()) === 1) {
+            $chapter = (float) $numeric_tokens[0][0];
+            $confidence = preg_match('/(?:^|[\s._-])[\[(]?\s*' . preg_quote($numeric_tokens[0][0], '/') . '\s*[\])]?\s*$/u', (string) $without_release_tags)
+                ? 'medium'
+                : 'low';
+            $source = $confidence === 'medium' ? 'unique_trailing_number' : 'unique_unlabeled_number';
+        } elseif (!empty($numeric_tokens[0])) {
+            $ambiguous = true;
+            $source = 'multiple_unlabeled_numbers';
+        }
     }
 
-    return array('volume' => $volume, 'chapter' => $chapter);
+    return array(
+        'volume' => $volume,
+        'chapter' => $chapter,
+        'confidence' => $confidence,
+        'source' => $source,
+        'ambiguous' => $ambiguous,
+    );
+}
+
+/** Infer a chapter from a consistent image filename batch; never trust one filename alone. */
+function manga_infer_chapter_from_filenames($files) {
+    $files = array_values((array) $files);
+    if (count($files) < 2) {
+        return array('chapter' => 0, 'confidence' => 'none', 'source' => '', 'ambiguous' => false);
+    }
+
+    $candidates = array();
+    foreach ($files as $file) {
+        $stem = pathinfo(basename((string) $file), PATHINFO_FILENAME);
+        $parsed = manga_parse_chapter_title($stem);
+        if ($parsed['chapter'] > 0 && $parsed['confidence'] === 'high') {
+            $candidate = array('number' => $parsed['chapter'], 'confidence' => 'high', 'source' => 'filename_marker');
+        } else {
+            // Typical scan names end in both chapter and page numbers: remove only the page token, then parse again.
+            $normalized_stem = manga_normalize_chapter_text($stem);
+            $without_page = preg_replace('/(?:^|[\s._-])\d{1,5}\s*$/u', '', $normalized_stem);
+            $parsed_without_page = $without_page !== $normalized_stem ? manga_parse_chapter_title($without_page) : array('chapter' => 0);
+            if (!empty($parsed_without_page['chapter'])) {
+                $candidate = array('number' => $parsed_without_page['chapter'], 'confidence' => ($parsed_without_page['confidence'] ?? 'low') === 'low' ? 'low' : 'medium', 'source' => 'filename_batch_pattern');
+            } elseif ($parsed['chapter'] > 0) {
+                $candidate = array('number' => $parsed['chapter'], 'confidence' => $parsed['confidence'], 'source' => 'filename_trailing_number');
+            } else {
+                continue;
+            }
+        }
+
+        $key = sprintf('%.6F', (float) $candidate['number']);
+        if (!isset($candidates[$key])) {
+            $candidates[$key] = array('number' => (float) $candidate['number'], 'count' => 0, 'high_count' => 0, 'medium_count' => 0, 'source' => $candidate['source']);
+        }
+        $candidates[$key]['count']++;
+        if ($candidate['confidence'] === 'high') {
+            $candidates[$key]['high_count']++;
+        } elseif ($candidate['confidence'] === 'medium') {
+            $candidates[$key]['medium_count']++;
+        }
+    }
+
+    if (!$candidates) {
+        return array('chapter' => 0, 'confidence' => 'none', 'source' => '', 'ambiguous' => false);
+    }
+    uasort($candidates, function($a, $b) {
+        return $b['count'] <=> $a['count'];
+    });
+    $best = reset($candidates);
+    $required = max(2, (int) ceil(count($files) * 0.9));
+    if (!$best || $best['count'] < $required) {
+        return array('chapter' => 0, 'confidence' => 'low', 'source' => 'inconsistent_filenames', 'ambiguous' => true);
+    }
+
+    return array(
+        'chapter' => $best['number'],
+        'confidence' => $best['high_count'] === $best['count'] ? 'high' : ($best['medium_count'] + $best['high_count'] === $best['count'] ? 'medium' : 'low'),
+        'source' => $best['source'],
+        'ambiguous' => false,
+    );
 }
 
 function manga_chapter_numbers_for_post($chapter_id) {
@@ -785,8 +918,9 @@ function manga_resolve_source_folder($submitted_path, $allow_chapter = false) {
 
     $relative = trim(substr($normalized_path, strlen($base_prefix)), '/');
     $segments = array_values(array_filter(explode('/', $relative), 'strlen'));
-    if ((!$allow_chapter && count($segments) !== 1) || ($allow_chapter && count($segments) < 2)) {
-        return new WP_Error('invalid_manga_path', 'The selected folder has an invalid location.');
+    if ((!$allow_chapter && count($segments) !== 1) ||
+        ($allow_chapter && (count($segments) < 2 || count($segments) > 5))) {
+        return new WP_Error('invalid_manga_path', 'The selected folder has an invalid location or is nested too deeply.');
     }
 
     $series_path = $base_prefix . $segments[0];
@@ -795,8 +929,13 @@ function manga_resolve_source_folder($submitted_path, $allow_chapter = false) {
         return new WP_Error('invalid_manga_path', 'The selected series folder is invalid.');
     }
 
-    if ($allow_chapter && (count($segments) > 3 || (count($segments) === 3 && !preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)\d+(?:\.\d+)?$/iu', $segments[1])))) {
-        return new WP_Error('invalid_manga_path', 'Only chapter folders and one level of volume folders are supported.');
+    if ($allow_chapter) {
+        for ($index = 1; $index < count($segments) - 1; $index++) {
+            $ancestor_path = $base_prefix . implode('/', array_slice($segments, 0, $index + 1));
+            if (!is_dir($ancestor_path) || manga_supported_image_files($ancestor_path)) {
+                return new WP_Error('invalid_manga_path', 'Chapter folders cannot be nested inside another image folder.');
+            }
+        }
     }
 
     return array(
@@ -825,10 +964,14 @@ function manga_supported_image_files($folder) {
 
 /** A chapter code in a filename such as "c011" or "c015#1". */
 function manga_filename_chapter_group($filename) {
-    if (!preg_match('/(?:^|[\s_-])c(\d+(?:\.\d+)?)(?=[\s(_\-.#]|$)/iu', (string) $filename, $matches)) {
-        return '';
+    $filename = manga_normalize_chapter_text((string) $filename);
+    if (preg_match('/(?:^|[\s._-])(?:c|ch(?:apter)?|ep(?:isode)?|cap(?:itulo)?|第|제)\s*[._:#-]*(\d+(?:\.\d+)?)(?=[\s(_\-.#]|$)/iu', $filename, $matches)) {
+        return 'c' . (string) (float) $matches[1];
     }
-    return 'c' . (string) (float) $matches[1];
+    if (preg_match('/(?:^|[\s._-])(\d+(?:\.\d+)?)\s*(?:화|話|章|回)(?=[\s(_\-.#]|$)/u', $filename, $matches)) {
+        return 'c' . (string) (float) $matches[1];
+    }
+    return '';
 }
 
 /** Limit a shared volume folder to the pages belonging to one chapter. */
@@ -1168,71 +1311,85 @@ function manga_set_cover_from_folder($manga_id, $series_path) {
     return false;
 }
 
-function manga_scan_chapter_folders($series_path) {
+function manga_scan_chapter_folders_recursive($directory, $series_path, $depth = 0) {
     $chapters = array();
-    if (!is_dir($series_path) || !is_readable($series_path)) {
+    $series_real = realpath($series_path);
+    $directory_real = realpath($directory);
+    if (!$series_real || !$directory_real || !is_dir($directory_real) || !is_readable($directory_real)) {
         return $chapters;
     }
 
-    foreach ((array) scandir($series_path) as $entry) {
-        if ($entry === '.' || $entry === '..') {
+    $series_prefix = trailingslashit(wp_normalize_path($series_real));
+    $directory_normalized = wp_normalize_path($directory_real);
+    if ($directory_normalized !== wp_normalize_path($series_real) && strpos($directory_normalized, $series_prefix) !== 0) {
+        return $chapters;
+    }
+
+    foreach ((array) scandir($directory_real) as $entry) {
+        if ($entry === '.' || $entry === '..' || strpos($entry, '.') === 0) {
+            continue;
+        }
+        $entry_path = trailingslashit($directory_real) . $entry;
+        if (is_link($entry_path) || !is_dir($entry_path)) {
+            continue;
+        }
+        $entry_real = realpath($entry_path);
+        if (!$entry_real || strpos(wp_normalize_path($entry_real), $series_prefix) !== 0) {
             continue;
         }
 
-        $entry_path = trailingslashit($series_path) . $entry;
-        if (!is_dir($entry_path)) {
-            continue;
-        }
-
-        $direct_images = manga_supported_image_files($entry_path);
+        $direct_images = manga_supported_image_files($entry_real);
         if ($direct_images) {
-            $chapters[] = array('name' => $entry, 'path' => $entry_path, 'image_count' => count($direct_images));
+            $relative = trim(substr(wp_normalize_path($entry_real), strlen($series_prefix)), '/');
+            $parts = array_values(array_filter(explode('/', $relative), 'strlen'));
+            $label = basename($entry_real);
+            for ($index = count($parts) - 2; $index >= 0; $index--) {
+                if (preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*\d+(?:\.\d+)?$/iu', $parts[$index])) {
+                    $label = $parts[$index] . ' ' . $label;
+                    break;
+                }
+            }
+            $chapters[] = array(
+                'name' => $label,
+                'path' => $entry_real,
+                'image_count' => count($direct_images),
+            );
             continue;
         }
 
-        if (!preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)\d+(?:\.\d+)?$/iu', $entry)) {
-            continue;
-        }
-
-        foreach ((array) scandir($entry_path) as $chapter_entry) {
-            if ($chapter_entry === '.' || $chapter_entry === '..') {
-                continue;
-            }
-            $chapter_path = trailingslashit($entry_path) . $chapter_entry;
-            if (!is_dir($chapter_path)) {
-                continue;
-            }
-            $chapter_images = manga_supported_image_files($chapter_path);
-            if ($chapter_images) {
-                $chapters[] = array(
-                    'name' => $entry . ' ' . $chapter_entry,
-                    'path' => $chapter_path,
-                    'image_count' => count($chapter_images),
-                );
-            }
+        // Bound recursion and skip symlinks above to avoid loops and paths escaping the library.
+        if ($depth < 4) {
+            $chapters = array_merge($chapters, manga_scan_chapter_folders_recursive($entry_real, $series_real, $depth + 1));
         }
     }
 
-    usort($chapters, function($a, $b) {
-        $info_a = manga_parse_chapter_title($a['name']);
-        $info_b = manga_parse_chapter_title($b['name']);
-        if ($info_a['volume'] !== $info_b['volume']) {
-            return $info_a['volume'] <=> $info_b['volume'];
-        }
-        if ($info_a['chapter'] !== $info_b['chapter']) {
-            return $info_a['chapter'] <=> $info_b['chapter'];
-        }
-        return strnatcasecmp($a['name'], $b['name']);
-    });
-
     return $chapters;
+}
+
+function manga_scan_chapter_folders($series_path) {
+    if (!is_dir($series_path) || !is_readable($series_path)) {
+        return array();
+    }
+    return manga_scan_chapter_folders_recursive($series_path, $series_path, 0);
+}
+
+/** Build a stable parsing label using the closest explicit volume ancestor, if present. */
+function manga_source_chapter_label($resolved) {
+    $segments = (array) ($resolved['relative_segments'] ?? array());
+    $chapter_name = (string) ($resolved['chapter_name'] ?? '');
+    for ($index = count($segments) - 2; $index >= 1; $index--) {
+        if (preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*\d+(?:\.\d+)?$/iu', $segments[$index])) {
+            return $segments[$index] . ' ' . $chapter_name;
+        }
+    }
+    return $chapter_name;
 }
 
 /** Discover ordinary chapter folders and chapters stored together in volume folders. */
 function manga_scan_auto_chapter_sources($series_path) {
     $chapters = array();
     foreach (manga_scan_chapter_folders($series_path) as $folder) {
-        if (!preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)(\d+(?:\.\d+)?)$/iu', $folder['name'], $volume_match)) {
+        if (!preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*(\d+(?:\.\d+)?)$/iu', $folder['name'], $volume_match)) {
             $folder['source_group'] = '';
             $chapters[] = $folder;
             continue;
@@ -1537,14 +1694,32 @@ function manga_auto_sync_library() {
                 continue;
             }
 
-            $volume_label = count($resolved_chapter['relative_segments']) === 3
-                ? $resolved_chapter['relative_segments'][1] . ' '
-                : '';
             $chapter_label = $source_group !== ''
                 ? $chapter_folder['name']
-                : trim($volume_label . $resolved_chapter['chapter_name']);
+                : manga_source_chapter_label($resolved_chapter);
             $numbers = manga_parse_chapter_title($chapter_label);
             if ($numbers['chapter'] <= 0 && !($source_group === 'volume' && $numbers['volume'] > 0)) {
+                if ($source_group !== 'volume') {
+                    $filename_candidate = manga_infer_chapter_from_filenames(
+                        manga_imported_source_files($resolved_chapter['path'], $source_group)
+                    );
+                    if (!empty($filename_candidate['chapter'])) {
+                        $numbers['chapter'] = (float) $filename_candidate['chapter'];
+                        $numbers['confidence'] = $filename_candidate['confidence'];
+                        $numbers['source'] = $filename_candidate['source'];
+                        $chapter_label .= ' - Ch. ' . $numbers['chapter'];
+                    } elseif (!empty($filename_candidate['ambiguous']) || !empty($numbers['ambiguous'])) {
+                        $sync_errors[] = 'Chapter number is ambiguous and needs review: ' . $resolved_chapter['path'];
+                        continue;
+                    }
+                }
+            }
+            if ($numbers['chapter'] <= 0 && !($source_group === 'volume' && $numbers['volume'] > 0)) {
+                $sync_errors[] = 'Could not determine a chapter number safely: ' . $resolved_chapter['path'];
+                continue;
+            }
+            if (($numbers['confidence'] ?? 'none') !== 'high' && $source_group !== 'volume') {
+                $sync_errors[] = 'Chapter number candidate needs manual confirmation (' . $numbers['chapter'] . '): ' . $resolved_chapter['path'];
                 continue;
             }
 
@@ -1583,6 +1758,8 @@ function manga_auto_sync_library() {
                     'connected_manga_id' => $manga_id,
                     'volume_number' => $numbers['volume'],
                     'chapter_number' => $numbers['chapter'],
+                    '_manga_chapter_parse_source' => $numbers['source'] ?? '',
+                    '_manga_chapter_parse_confidence' => $numbers['confidence'] ?? 'none',
                     'image_links' => implode("\n", $image_urls),
                     'image_attachment_ids' => array(),
                     'imported_from_path' => $resolved_chapter['path'],
@@ -1789,7 +1966,20 @@ function render_folder_import_page() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        <?php foreach ($chapters as $chapter): ?>
+                                        <?php foreach ($chapters as $chapter):
+                                            $chapter_preview = manga_parse_chapter_title($chapter['name']);
+                                            if ($chapter_preview['chapter'] <= 0 && $chapter_preview['volume'] <= 0) {
+                                                $filename_preview = manga_infer_chapter_from_filenames(manga_supported_image_files($chapter['path']));
+                                                if (!empty($filename_preview['chapter'])) {
+                                                    $chapter_preview['chapter'] = $filename_preview['chapter'];
+                                                    $chapter_preview['confidence'] = $filename_preview['confidence'];
+                                                    $chapter_preview['source'] = $filename_preview['source'];
+                                                }
+                                            }
+                                            $preview_label = $chapter_preview['chapter'] > 0
+                                                ? 'Chapter ' . $chapter_preview['chapter']
+                                                : ($chapter_preview['volume'] > 0 ? 'Volume ' . $chapter_preview['volume'] : 'Number needs review');
+                                        ?>
                                             <tr>
                                                 <td>
                                                     <input type="checkbox" name="selected_chapters[]" value="<?php echo esc_attr($chapter['path']); ?>" 
@@ -1797,6 +1987,7 @@ function render_folder_import_page() {
                                                 </td>
                                                 <td>
                                                     <strong><?php echo esc_html($chapter['name']); ?></strong>
+                                                    <br><small><?php echo esc_html($preview_label); ?> · <?php echo esc_html($chapter_preview['confidence']); ?> confidence · <?php echo esc_html($chapter_preview['source'] ?: 'no reliable evidence'); ?></small>
                                                   </td>
                                                   <td><?php echo $chapter['image_count']; ?> images</td>
                                                   <td>
@@ -1968,11 +2159,22 @@ function manga_start_folder_import() {
         wp_send_json_error(array('message' => 'No supported images were found in this chapter folder.'));
     }
 
-    $volume_label = count($resolved['relative_segments']) === 3 ? $resolved['relative_segments'][1] . ' ' : '';
-    $chapter_label = trim($volume_label . $resolved['chapter_name']);
+    $chapter_label = manga_source_chapter_label($resolved);
     $chapter_numbers = manga_parse_chapter_title($chapter_label);
     if ($chapter_numbers['chapter'] <= 0) {
-        wp_send_json_error(array('message' => 'Chapter number not recognized. Use Ch. 10, Chapter 10, Ep. 10, ตอนที่ 10, 10, 10 - 10, or 10 - a chapter title in the folder name.'));
+        $filename_candidate = manga_infer_chapter_from_filenames($files);
+        if (!empty($filename_candidate['chapter'])) {
+            $chapter_numbers['chapter'] = (float) $filename_candidate['chapter'];
+            $chapter_numbers['confidence'] = $filename_candidate['confidence'];
+            $chapter_numbers['source'] = $filename_candidate['source'];
+            $chapter_label .= ' - Ch. ' . $chapter_numbers['chapter'];
+        }
+    }
+    if ($chapter_numbers['chapter'] <= 0) {
+        $reason = !empty($chapter_numbers['ambiguous']) || !empty($filename_candidate['ambiguous'])
+            ? 'Several numbers were found but the chapter number is ambiguous.'
+            : 'No reliable chapter number was found in the folder or image filenames.';
+        wp_send_json_error(array('message' => $reason . ' Rename the folder clearly or review its file naming.'));
     }
 
     $manga_id = manga_find_or_create_from_folder($resolved['series_path']);
@@ -2002,13 +2204,15 @@ function manga_start_folder_import() {
         'chapter_title' => $chapter_title,
         'volume_number' => $chapter_numbers['volume'],
         'chapter_number' => $chapter_numbers['chapter'],
+        'chapter_source' => $chapter_numbers['source'] ?? '',
+        'chapter_confidence' => $chapter_numbers['confidence'] ?? 'none',
         'manga_id' => $manga_id,
         'files' => $files,
         'next_offset' => 0,
         'image_urls' => array(),
     );
     set_transient('manga_import_job_' . get_current_user_id() . '_' . md5($job_id), $job, 2 * HOUR_IN_SECONDS);
-    wp_send_json_success(array('job_id' => $job_id, 'total_images' => count($files)));
+    wp_send_json_success(array('job_id' => $job_id, 'total_images' => count($files), 'chapter_number' => $chapter_numbers['chapter'], 'chapter_source' => $chapter_numbers['source'] ?? '', 'chapter_confidence' => $chapter_numbers['confidence'] ?? 'none'));
 }
 add_action('wp_ajax_manga_start_folder_import', 'manga_start_folder_import');
 
@@ -2076,6 +2280,8 @@ function manga_process_folder_import_batch() {
             'connected_manga_id' => $job['manga_id'],
             'volume_number' => $job['volume_number'],
             'chapter_number' => $job['chapter_number'],
+            '_manga_chapter_parse_source' => $job['chapter_source'] ?? '',
+            '_manga_chapter_parse_confidence' => $job['chapter_confidence'] ?? 'none',
             'image_links' => implode("\n", $job['image_urls']),
             'image_attachment_ids' => array(),
             'imported_from_path' => $job['path'],
