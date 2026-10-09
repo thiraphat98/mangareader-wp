@@ -1585,10 +1585,36 @@ function manga_scan_auto_chapter_sources($series_path) {
 
 /** List sources the manual importer can safely select, including chapter groups in a volume. */
 function manga_manual_import_sources($series_path) {
+    $sources = manga_scan_auto_chapter_sources($series_path);
+    $paths = array_values(array_unique(array_column($sources, 'path')));
+    if (!$paths) {
+        return array();
+    }
+
+    // Read existing records once instead of querying for each chapter folder.
+    $existing = array();
+    $chapter_ids = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
+        'posts_per_page' => -1,
+        'fields' => 'ids',
+        'meta_query' => array(array(
+            'key' => 'imported_from_path',
+            'value' => $paths,
+            'compare' => 'IN',
+        )),
+        'suppress_filters' => true,
+    ));
+    foreach ($chapter_ids as $chapter_id) {
+        $path = (string) get_post_meta($chapter_id, 'imported_from_path', true);
+        $group = (string) get_post_meta($chapter_id, '_manga_source_group', true);
+        $existing[$path . '|' . $group] = true;
+    }
+
     $available = array();
-    foreach (manga_scan_auto_chapter_sources($series_path) as $source) {
+    foreach ($sources as $source) {
         if (!empty($source['scan_error']) ||
-            manga_imported_source_exists($source['path'], $source['source_group'])) {
+            isset($existing[$source['path'] . '|' . $source['source_group']])) {
             continue;
         }
         $available[] = $source;
@@ -2384,15 +2410,12 @@ function render_folder_import_page() {
                     </div>
                 <?php else: ?>
                     <ul style="list-style: none; padding: 0;">
-                        <?php foreach ($manga_folders as $manga): 
-                            $folder_path = $base_path . $manga;
-                            $chapter_count = count(manga_manual_import_sources($folder_path));
-                        ?>
+                        <?php foreach ($manga_folders as $manga): ?>
                             <li style="margin-bottom: 10px;">
                                 <a href="<?php echo esc_url(add_query_arg(array('page' => 'folder-import', 'manga' => $manga), admin_url('admin.php'))); ?>"
                                    style="display: block; padding: 10px; background: <?php echo ($current_manga === $manga) ? '#e94560' : '#f5f5f5'; ?>; color: <?php echo ($current_manga === $manga) ? 'white' : '#333'; ?>; text-decoration: none; border-radius: 6px;">
                                     📖 <strong><?php echo esc_html($manga); ?></strong>
-                                    <span style="float: right; font-size: 12px;">📄 <?php echo $chapter_count; ?> chapters</span>
+                                    <span style="float: right; font-size: 12px;">View chapters</span>
                                 </a>
                             </li>
                         <?php endforeach; ?>

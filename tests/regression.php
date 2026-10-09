@@ -11,6 +11,7 @@ $test_chapters = array();
 $test_manga_posts = array();
 $test_manga_meta = array();
 $test_replace_lock_before_delete = null;
+$test_chapter_queries = 0;
 
 function add_option($key, $value, ...$args) {
     global $test_options;
@@ -23,14 +24,23 @@ function get_option($key, $default = false) {
     return $test_options[$key] ?? $default;
 }
 function get_posts($args) {
-    global $test_chapters, $test_manga_posts;
+    global $test_chapters, $test_manga_posts, $test_chapter_queries;
     if (($args['post_type'] ?? '') === 'manga') return $test_manga_posts;
     if (($args['post_type'] ?? '') !== 'chapter') return array();
+    $test_chapter_queries++;
     $ids = array();
     foreach ($test_chapters as $id => $meta) {
         if (isset($args['meta_value']) && ($meta['imported_from_path'] ?? '') === $args['meta_value']) $ids[] = $id;
-        if (isset($args['meta_query']) && in_array((int) ($meta['connected_manga_id'] ?? 0),
-            (array) $args['meta_query'][0]['value'], true)) $ids[] = (object) array('ID' => $id);
+        if (isset($args['meta_query'])) {
+            $query = $args['meta_query'][0];
+            if ($query['key'] === 'imported_from_path' &&
+                in_array($meta['imported_from_path'] ?? '', (array) $query['value'], true)) {
+                $ids[] = $id;
+            } elseif ($query['key'] === 'connected_manga_id' &&
+                in_array((int) ($meta['connected_manga_id'] ?? 0), (array) $query['value'], true)) {
+                $ids[] = (object) array('ID' => $id);
+            }
+        }
     }
     return $ids;
 }
@@ -123,8 +133,10 @@ try {
         'manual import rejects an unknown group');
     check(count(manga_manual_import_sources($series)) === 3, 'manual importer lists every source');
     $test_chapters[1] = array('imported_from_path' => realpath($volume_one), '_manga_source_group' => 'c11');
+    $test_chapter_queries = 0;
     $remaining = manga_manual_import_sources($series);
     check(count($remaining) === 2 && $remaining[0]['source_group'] === 'c12', 'imported group does not hide sibling');
+    check($test_chapter_queries === 1, 'manual source scan uses one chapter query');
     check(count(manga_imported_source_files($volume_one, 'c12')) === 2, 'grouped source files');
     check(manga_parse_chapter_title('Vol. 2')['volume'] === 2.0, 'volume-only number');
 
