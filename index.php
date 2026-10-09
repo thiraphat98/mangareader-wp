@@ -23,6 +23,7 @@ $manga_query = new WP_Query(array(
 ));
 $manga_ids = array_merge(wp_list_pluck($popular_manga, 'ID'), wp_list_pluck($manga_query->posts, 'ID'));
 $chapter_groups = manga_chapters_by_manga_ids($manga_ids);
+manga_sort_posts_by_latest_chapter($manga_query->posts, $chapter_groups);
 ?>
 
 <div class="homepage-content">

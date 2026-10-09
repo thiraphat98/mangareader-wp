@@ -2783,7 +2783,8 @@ function ajax_filter_manga_home() {
     
     $args = array(
         'post_type' => 'manga',
-        'posts_per_page' => -1
+        'posts_per_page' => -1,
+        'post_status' => 'publish',
     );
     
     switch ($sort_by) {
@@ -2793,13 +2794,16 @@ function ajax_filter_manga_home() {
             break;
         case 'recent':
         default:
-            $args['orderby'] = 'modified';
-            $args['order'] = 'DESC';
+            // The manga post itself is not modified when a chapter is published.
             break;
     }
     
-    $manga_query = new WP_Query($args);
-    output_manga_grid($manga_query->posts);
+    $manga_posts = get_posts($args);
+    $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_posts, 'ID'));
+    if ($sort_by !== 'alphabetical') {
+        manga_sort_posts_by_latest_chapter($manga_posts, $chapter_groups);
+    }
+    output_manga_grid($manga_posts, $chapter_groups);
     wp_die();
 }
 add_action('wp_ajax_filter_manga_home', 'ajax_filter_manga_home');
@@ -2851,6 +2855,21 @@ function manga_chapters_by_manga_ids($manga_ids) {
         }
     }
     return $grouped;
+}
+
+// Order manga grids by each series' newest published chapter, not the parent post's edit date.
+function manga_sort_posts_by_latest_chapter(&$manga_posts, $chapter_groups) {
+    usort($manga_posts, function($a, $b) use ($chapter_groups) {
+        $chapters_a = $chapter_groups[$a->ID] ?? array();
+        $chapters_b = $chapter_groups[$b->ID] ?? array();
+        $date_a = !empty($chapters_a) ? strtotime($chapters_a[0]->post_date_gmt ?: $chapters_a[0]->post_date) : strtotime($a->post_modified_gmt ?: $a->post_modified);
+        $date_b = !empty($chapters_b) ? strtotime($chapters_b[0]->post_date_gmt ?: $chapters_b[0]->post_date) : strtotime($b->post_modified_gmt ?: $b->post_modified);
+
+        if ($date_a === $date_b) {
+            return (int) $b->ID <=> (int) $a->ID;
+        }
+        return $date_b <=> $date_a;
+    });
 }
 
 // Sort by volume and chapter once per post; the same ordering is used in grids and chapter lists.
