@@ -64,9 +64,7 @@
                 }
                 
                 // Sort by sort_key (volume * 1000 + chapter) descending for latest detection
-                usort($chapters_with_info, function($a, $b) {
-                    return $b['info']['sort_key'] - $a['info']['sort_key'];
-                });
+                manga_sort_chapter_info($chapters_with_info);
                 
                 $total_chapters = count($chapters_with_info);
                 $latest_chapter = !empty($chapters_with_info) ? $chapters_with_info[0] : null;
