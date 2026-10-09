@@ -1,4 +1,4 @@
-param([string]$ConfigPath = "$env:LOCALAPPDATA\MangaReaderWatcher\watcher.json")
+param([string]$ConfigPath = (Join-Path $PSScriptRoot 'watcher.json'))
 $ErrorActionPreference = 'Stop'
 $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 $root = [IO.Path]::GetFullPath([string]$config.library).TrimEnd('\')
@@ -7,6 +7,9 @@ $secret = [string]$config.secret
 if ($secret.Length -lt 32) { throw 'Watcher secret is missing.' }
 $logPath = Join-Path (Split-Path $ConfigPath) 'watcher.log'
 function Log([string]$message) {
+    if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt 2097152) {
+        Move-Item -LiteralPath $logPath -Destination ($logPath + '.old') -Force
+    }
     "[$(Get-Date -Format o)] $message" | Out-File -LiteralPath $logPath -Append -Encoding utf8
 }
 function ChapterPath([string]$path) {
@@ -45,7 +48,7 @@ $pending = @{}
 $lastRequest = [DateTime]::MinValue
 function Queue([string]$path) {
     $folder = ChapterPath $path
-    if ($folder) { $pending[$folder] = [DateTime]::UtcNow }
+    if ($folder) { if (-not $pending.ContainsKey($folder)) { Log "Queued $folder" }; $pending[$folder] = [DateTime]::UtcNow }
 }
 $watcher = [IO.FileSystemWatcher]::new($root)
 $watcher.IncludeSubdirectories = $true
@@ -72,7 +75,7 @@ try {
             if ((([DateTime]::UtcNow - $lastRequest).TotalSeconds) -lt 1) { break }
             $before = Manifest $folder
             if (-not $before) {
-                if ((([DateTime]::UtcNow - $pending[$folder]).TotalMinutes) -gt 10) { $pending.Remove($folder) }
+                $pending.Remove($folder)
                 continue
             }
             Start-Sleep -Seconds 1
