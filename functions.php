@@ -3077,6 +3077,8 @@ function ajax_filter_manga_by_status() {
     }
     
     $manga_query = new WP_Query($args);
+    $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_query->posts, 'ID'));
+    manga_sort_posts_by_latest_chapter($manga_query->posts, $chapter_groups);
     
     if ($manga_query->have_posts()) {
         echo '<div class="manga-grid">';
@@ -3115,6 +3117,8 @@ function ajax_filter_manga_by_genre() {
     );
     
     $manga_query = new WP_Query($args);
+    $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_query->posts, 'ID'));
+    manga_sort_posts_by_latest_chapter($manga_query->posts, $chapter_groups);
     
     if ($manga_query->have_posts()) {
         echo '<div class="manga-grid">';
