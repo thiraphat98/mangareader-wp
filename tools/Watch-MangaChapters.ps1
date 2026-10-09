@@ -30,8 +30,6 @@ function Manifest([string]$folder) {
         Where-Object { $_.Extension -match '^\.(jpg|jpeg|png|gif|webp|avif)$' -and $_.Length -gt 0 } |
         Sort-Object Name)
     if ($files.Count -eq 0) { return $null }
-    $maxWrite = ($files | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
-    if (((Get-Date).ToUniversalTime() - $maxWrite).TotalSeconds -lt 3) { return $null }
     return ($files | ForEach-Object { "$($_.Name)|$($_.Length)|$($_.LastWriteTimeUtc.Ticks)" }) -join [char]10
 }
 function Send([string]$folder) {
@@ -48,7 +46,7 @@ $pending = @{}
 $lastRequest = [DateTime]::MinValue
 function Queue([string]$path) {
     $folder = ChapterPath $path
-    if ($folder) { if (-not $pending.ContainsKey($folder)) { Log "Queued $folder" }; $pending[$folder] = [DateTime]::UtcNow }
+    if ($folder -and -not $pending.ContainsKey($folder)) { Log "Queued $folder"; $pending[$folder] = [DateTime]::UtcNow }
 }
 $watcher = [IO.FileSystemWatcher]::new($root)
 $watcher.IncludeSubdirectories = $true
