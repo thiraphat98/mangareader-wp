@@ -124,6 +124,10 @@ try {
     foreach ($files as $file) file_put_contents($series . '/' . $file, 'image');
     $sources = manga_scan_auto_chapter_sources($series);
     check(count($sources) === 3, 'two chapter groups and one volume source');
+    $targeted = manga_scan_auto_chapter_sources($series, $volume_one);
+    check(count($targeted) === 2 && array_column($targeted, 'source_group') === array('c11', 'c12'),
+        'event scan reads only the changed folder');
+    check(manga_new_source_stable($volume_one, 'c11', array(), true), 'signed watcher bypasses delayed second scan');
     check(array_column($sources, 'source_group') === array('c11', 'c12', 'volume'), 'source group detection');
     check(manga_find_auto_source($series, realpath($volume_one), 'c12')['name'] === 'Vol. 1 Ch. 12',
         'manual import selects the requested group');
