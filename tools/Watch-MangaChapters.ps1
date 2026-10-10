@@ -270,7 +270,15 @@ try {
                 $script:pending[$folder].attempts++
                 $delay = [Math]::Min(60, [Math]::Pow(2, [Math]::Min(6, $script:pending[$folder].attempts)))
                 $script:pending[$folder].due = [DateTime]::UtcNow.AddSeconds($delay)
-                Log "Retry $((Relative $folder)) in $delay s: $($_.Exception.Message)"
+                $detail = $_.Exception.Message
+                if ($_.Exception.Response) {
+                    try {
+                        $reader = [IO.StreamReader]::new($_.Exception.Response.GetResponseStream())
+                        try { $body = $reader.ReadToEnd(); $detail += ' ' + $body.Substring(0, [Math]::Min(500, $body.Length)) }
+                        finally { $reader.Dispose() }
+                    } catch { }
+                }
+                Log "Retry $((Relative $folder)) in $delay s: $detail"
             }
         } catch {
             Log "Recovering watcher: $($_.Exception.Message)"
