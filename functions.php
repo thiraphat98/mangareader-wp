@@ -3481,4 +3481,3 @@ function manga_register_watcher_route() {
     ));
 }
 add_action('rest_api_init', 'manga_register_watcher_route');
-
