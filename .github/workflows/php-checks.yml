@@ -1,0 +1,23 @@
+name: Theme checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  theme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Lint PHP
+        run: find . -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Import and sorting regression checks
+        run: php -n tests/regression.php
+      - name: Check archive JavaScript syntax
+        run: node tests/check-inline-js.mjs

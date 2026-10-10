@@ -112,27 +112,169 @@ function extract_chapter_number($title) {
 }
 
 /** Parse supported chapter and volume naming styles from imported folder names. */
+function manga_normalize_chapter_text($value) {
+    $value = trim((string) $value);
+    if (class_exists('Normalizer')) {
+        $normalized = Normalizer::normalize($value, Normalizer::FORM_KC);
+        if (is_string($normalized)) {
+            $value = $normalized;
+        }
+    }
+
+    $digit_sets = array(
+        '٠١٢٣٤٥٦٧٨٩', // Arabic-Indic
+        '۰۱۲۳۴۵۶۷۸۹', // Eastern Arabic/Persian
+        '０１２３４５６７８９', // Full-width
+        '०१२३४५६७८९', // Devanagari
+        '০১২৩৪৫৬৭৮৯', // Bengali
+        '๐๑๒๓๔๕๖๗๘๙', // Thai
+    );
+    $ascii_digits = str_split('0123456789');
+    foreach ($digit_sets as $digit_set) {
+        $digits = preg_split('//u', $digit_set, -1, PREG_SPLIT_NO_EMPTY);
+        if (is_array($digits) && count($digits) === 10) {
+            $value = strtr($value, array_combine($digits, $ascii_digits));
+        }
+    }
+
+    return trim(strtr($value, array(
+        '−' => '-',
+        '–' => '-',
+        '—' => '-',
+        '－' => '-',
+        '．' => '.',
+        '＿' => '_',
+        "\u{200B}" => '',
+        "\u{FEFF}" => '',
+    )));
+}
+
+/** Return chapter/volume candidates with confidence and evidence for safe import decisions. */
 function manga_parse_chapter_title($title) {
-    $title = trim((string) $title);
+    $title = manga_normalize_chapter_text($title);
     $volume = 0;
     $chapter = 0;
+    $confidence = 'none';
+    $source = '';
+    $ambiguous = false;
 
-    if (preg_match('/(?:Vol(?:ume)?\.?|V)\s*(\d+(?:\.\d+)?)/iu', $title, $matches)) {
+    if (preg_match('/(?:^|[\s\[(])(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*(\d+(?:\.\d+)?)/iu', $title, $matches)) {
         $volume = (float) $matches[1];
     }
 
-    if (preg_match('/(?:Ch(?:apter)?[. _-]*|Episode[. _-]*|ตอน[ _-]*(?:ที่)?[ _-]*)(\d+(?:\.\d+)?)/iu', $title, $matches)) {
+    // Language labels are hints, not requirements: the numeric-position rules below are language-neutral.
+    $chapter_markers = 'Ch(?:apter)?|Ep(?:isode)?|Cap[ií]tulo|Cap(?:itolo)?|Chap(?:itre)?|Chương|Chuong|Bab|Hoofdstuk|Kapitel|Глава|Гл\\.?|فصل|अध्याय|অধ্যায়|ตอน(?:ที่)?|第|제|No\\.?|N°|№';
+    if (preg_match('/(?:^|[\s\[(])(?:' . $chapter_markers . ')[\s._:#-]*(\d+(?:\.\d+)?)/iu', $title, $matches)) {
         $chapter = (float) $matches[1];
-    } elseif (preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)\d+(?:\.\d+)?\s+(\d+(?:\.\d+)?)$/iu', $title, $matches)) {
+        $confidence = 'high';
+        $source = 'chapter_marker';
+    } elseif (preg_match('/(\d+(?:\.\d+)?)\s*(?:화|話|章|回)(?=$|[\s._-]|\(|\[)/u', $title, $matches)) {
         $chapter = (float) $matches[1];
-    } elseif (!preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)\d+(?:\.\d+)?$/iu', $title)
-        && preg_match('/^\s*(\d+(?:\.\d+)?)\s*$/u', $title, $matches)) {
+        $confidence = 'high';
+        $source = 'chapter_suffix_marker';
+    } elseif (preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*(\d+(?:\.\d+)?)[\s._-]+(?:Ch(?:apter)?[\s._-]*)?(\d+(?:\.\d+)?)$/iu', $title, $matches)) {
+        $volume = (float) $matches[1];
+        $chapter = (float) $matches[2];
+        $confidence = 'high';
+        $source = 'volume_and_chapter_numbers';
+    } elseif (preg_match('/^\s*(?:\[(?=[^\]]{1,80}\])(?=[^\]]*[^\d])[^\]]+\]\s*)*[\[(]?\s*(\d+(?:\.\d+)?)(?!\s*[-_]\s*\d)\s*[\])]?(?=$|[\s._-])/u', $title, $matches)) {
         $chapter = (float) $matches[1];
-    } elseif (preg_match('/(?:^|[\s_-])(\d+(?:\.\d+)?)\s*-\s*\d+(?:\.\d+)?\s*$/u', $title, $matches)) {
-        $chapter = (float) $matches[1];
+        $confidence = 'high';
+        $source = 'leading_number';
+    } elseif (preg_match('/^\s*(\d+(?:\.\d+)?)\s*[-_]\s*(\d+(?:\.\d+)?)\s*$/u', $title, $matches)) {
+        if ((float) $matches[1] === (float) $matches[2]) {
+            $chapter = (float) $matches[1];
+            $confidence = 'high';
+            $source = 'repeated_chapter_number';
+        } else {
+            $ambiguous = true;
+            $source = 'conflicting_number_pair';
+        }
+    } elseif ($volume > 0 && preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*\d+(?:\.\d+)?$/iu', $title)) {
+        $source = 'volume_only';
+    } else {
+        $without_release_tags = preg_replace('/^\s*(?:\[[^\]]{1,80}\]\s*)+/', '', $title);
+        preg_match_all('/\d+(?:\.\d+)?/u', (string) $without_release_tags, $numeric_tokens);
+        if (count($numeric_tokens[0] ?? array()) === 1) {
+            $chapter = (float) $numeric_tokens[0][0];
+            $confidence = preg_match('/(?:^|[\s._-])[\[(]?\s*' . preg_quote($numeric_tokens[0][0], '/') . '\s*[\])]?\s*$/u', (string) $without_release_tags)
+                ? 'medium'
+                : 'low';
+            $source = $confidence === 'medium' ? 'unique_trailing_number' : 'unique_unlabeled_number';
+        } elseif (!empty($numeric_tokens[0])) {
+            $ambiguous = true;
+            $source = 'multiple_unlabeled_numbers';
+        }
     }
 
-    return array('volume' => $volume, 'chapter' => $chapter);
+    return array(
+        'volume' => $volume,
+        'chapter' => $chapter,
+        'confidence' => $confidence,
+        'source' => $source,
+        'ambiguous' => $ambiguous,
+    );
+}
+
+/** Infer a chapter from a consistent image filename batch; never trust one filename alone. */
+function manga_infer_chapter_from_filenames($files) {
+    $files = array_values((array) $files);
+    if (count($files) < 2) {
+        return array('chapter' => 0, 'confidence' => 'none', 'source' => '', 'ambiguous' => false);
+    }
+
+    $candidates = array();
+    foreach ($files as $file) {
+        $stem = pathinfo(basename((string) $file), PATHINFO_FILENAME);
+        $parsed = manga_parse_chapter_title($stem);
+        if ($parsed['chapter'] > 0 && $parsed['confidence'] === 'high') {
+            $candidate = array('number' => $parsed['chapter'], 'confidence' => 'high', 'source' => 'filename_marker');
+        } elseif (($filename_group = manga_filename_chapter_group($stem)) !== '') {
+            $candidate = array('number' => (float) substr($filename_group, 1), 'confidence' => 'high', 'source' => 'filename_chapter_code');
+        } else {
+            // Typical scan names end in both chapter and page numbers: remove only the page token, then parse again.
+            $normalized_stem = manga_normalize_chapter_text($stem);
+            $without_page = preg_replace('/(?:^|[\s._-])\d{1,5}\s*$/u', '', $normalized_stem);
+            $parsed_without_page = $without_page !== $normalized_stem ? manga_parse_chapter_title($without_page) : array('chapter' => 0);
+            if (!empty($parsed_without_page['chapter'])) {
+                $candidate = array('number' => $parsed_without_page['chapter'], 'confidence' => ($parsed_without_page['confidence'] ?? 'low') === 'low' ? 'low' : 'medium', 'source' => 'filename_batch_pattern');
+            } elseif ($parsed['chapter'] > 0) {
+                $candidate = array('number' => $parsed['chapter'], 'confidence' => $parsed['confidence'], 'source' => 'filename_trailing_number');
+            } else {
+                continue;
+            }
+        }
+
+        $key = sprintf('%.6F', (float) $candidate['number']);
+        if (!isset($candidates[$key])) {
+            $candidates[$key] = array('number' => (float) $candidate['number'], 'count' => 0, 'high_count' => 0, 'medium_count' => 0, 'source' => $candidate['source']);
+        }
+        $candidates[$key]['count']++;
+        if ($candidate['confidence'] === 'high') {
+            $candidates[$key]['high_count']++;
+        } elseif ($candidate['confidence'] === 'medium') {
+            $candidates[$key]['medium_count']++;
+        }
+    }
+
+    if (!$candidates) {
+        return array('chapter' => 0, 'confidence' => 'none', 'source' => '', 'ambiguous' => false);
+    }
+    uasort($candidates, function($a, $b) {
+        return $b['count'] <=> $a['count'];
+    });
+    $best = reset($candidates);
+    $required = max(2, (int) ceil(count($files) * 0.9));
+    if (!$best || $best['count'] < $required) {
+        return array('chapter' => 0, 'confidence' => 'low', 'source' => 'inconsistent_filenames', 'ambiguous' => true);
+    }
+
+    return array(
+        'chapter' => $best['number'],
+        'confidence' => $best['high_count'] === $best['count'] ? 'high' : ($best['medium_count'] + $best['high_count'] === $best['count'] ? 'medium' : 'low'),
+        'source' => $best['source'],
+        'ambiguous' => false,
+    );
 }
 
 function manga_chapter_numbers_for_post($chapter_id) {
@@ -143,6 +285,29 @@ function manga_chapter_numbers_for_post($chapter_id) {
         'chapter' => $chapter > 0 ? $chapter : $parsed['chapter'],
         'volume' => $volume > 0 ? $volume : $parsed['volume'],
     );
+}
+
+/** Compare stored chapter metadata and legacy titles using the same precision in every importer. */
+function manga_find_chapter_number_conflict($manga_id, $numbers, $known_chapter_ids = null) {
+    if ($known_chapter_ids === null) {
+        $known_chapter_ids = get_posts(array(
+            'post_type' => 'chapter',
+            'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
+            'posts_per_page' => -1,
+            'fields' => 'ids',
+            'meta_query' => array(array('key' => 'connected_manga_id', 'value' => (int) $manga_id)),
+        ));
+    }
+    $target_volume = sprintf('%.6F', (float) $numbers['volume']);
+    $target_chapter = sprintf('%.6F', (float) $numbers['chapter']);
+    foreach ($known_chapter_ids as $chapter_id) {
+        $saved = manga_chapter_numbers_for_post($chapter_id);
+        if (sprintf('%.6F', (float) $saved['volume']) === $target_volume &&
+            sprintf('%.6F', (float) $saved['chapter']) === $target_chapter) {
+            return (int) $chapter_id;
+        }
+    }
+    return 0;
 }
 
 function manga_chapter_display_label($chapter_id) {
@@ -353,7 +518,7 @@ function render_chapter_connection_meta_box($post) {
     </div>
     <div style="margin-bottom: 15px;">
         <label style="display: block; font-weight: 600; margin-bottom: 5px;">Chapter Number:</label>
-        <input type="number" name="chapter_number" value="<?php echo esc_attr($chapter_number); ?>" step="0.1" style="width: 100%; padding: 8px;">
+        <input type="number" name="chapter_number" value="<?php echo esc_attr($chapter_number); ?>" step="any" style="width: 100%; padding: 8px;">
     </div>
     <?php
 }
@@ -374,6 +539,12 @@ function save_chapter_connection_meta_box($post_id) {
     $manga_id = isset($_POST['connected_manga']) ? absint($_POST['connected_manga']) : 0;
     $volume_num = isset($_POST['volume_number']) ? (float) $_POST['volume_number'] : 0;
     $chapter_num = isset($_POST['chapter_number']) ? (float) $_POST['chapter_number'] : 0;
+    if (get_post_meta($post_id, 'imported_from_path', true) &&
+        ((int) get_post_meta($post_id, 'connected_manga_id', true) !== $manga_id ||
+         (float) get_post_meta($post_id, 'volume_number', true) !== $volume_num ||
+         (float) get_post_meta($post_id, 'chapter_number', true) !== $chapter_num)) {
+        update_post_meta($post_id, '_manga_manual_override', '1');
+    }
 
     if ($manga_id && get_post_type($manga_id) === 'manga') {
         update_post_meta($post_id, 'connected_manga_id', $manga_id);
@@ -477,6 +648,7 @@ function render_chapter_images_meta_box($post) {
         <p><strong>Option 1: Upload Images</strong></p>
         <button type="button" id="upload-images-btn" class="button button-primary">Select Images</button>
         <input type="file" id="image-files" multiple accept="image/*" style="display:none">
+        <span id="chapter-upload-status" role="status" aria-live="polite"></span>
         <div id="image-preview" class="image-preview-container">
             <?php 
             if (!empty($image_links)) {
@@ -504,16 +676,35 @@ function render_chapter_images_meta_box($post) {
     
     <script>
     jQuery(document).ready(function($) {
+        var uploadInProgress = false;
+        var uploadFailures = [];
+        function setUploadBusy(busy) {
+            uploadInProgress = busy;
+            $('#upload-images-btn, #publish, #save-post').prop('disabled', busy);
+            $('#chapter-upload-status').text(busy ? 'Uploading images. Keep this page open; saving is paused.' :
+                (uploadFailures.length ? 'Some images failed: ' + uploadFailures.join(', ') + '. Review the pages before saving.' : 'Upload complete. Review the pages before saving.'));
+        }
+        $('#post').on('submit', function(event) {
+            if (uploadInProgress) {
+                event.preventDefault();
+                alert('Wait for the image upload to finish before saving this chapter.');
+            }
+        });
         $('#upload-images-btn').on('click', function() {
+            if (uploadInProgress) return;
             $('#image-files').trigger('click');
         });
         
         $('#image-files').on('change', function(e) {
             var files = Array.prototype.slice.call(e.target.files || []);
+            if (!files.length || uploadInProgress) return;
+            uploadFailures = [];
+            setUploadBusy(true);
             var batchSize = 8;
             var uploadBatch = function(offset) {
                 if (offset >= files.length) {
                     updateImageLinksField();
+                    setUploadBusy(false);
                     return;
                 }
                 var formData = new FormData();
@@ -530,17 +721,21 @@ function render_chapter_images_meta_box($post) {
                                 addImageToPreview(image.url, image.id);
                             });
                             if (response.data.failed && response.data.failed.length) {
-                                alert('Some files could not be uploaded: ' + response.data.failed.join(', '));
+                                uploadFailures = uploadFailures.concat(response.data.failed);
                             }
                             uploadBatch(offset + batchSize);
                         } else {
                             var message = response.data && response.data.message ? response.data.message : 'Unknown error';
                             alert('Upload failed: ' + message);
                             updateImageLinksField();
+                            uploadFailures.push(message);
+                            setUploadBusy(false);
                         }
                     }).fail(function() {
                         alert('Upload request failed. Please retry the remaining images.');
                         updateImageLinksField();
+                        uploadFailures.push('Request failed; remaining images were not uploaded');
+                        setUploadBusy(false);
                     });
             };
             uploadBatch(0);
@@ -602,7 +797,12 @@ function save_chapter_images_meta_box($post_id) {
     }
 
     if (isset($_POST['final_image_links'])) {
-        update_post_meta($post_id, 'image_links', sanitize_textarea_field(wp_unslash($_POST['final_image_links'])));
+        $links = sanitize_textarea_field(wp_unslash($_POST['final_image_links']));
+        if (get_post_meta($post_id, 'imported_from_path', true) &&
+            $links !== (string) get_post_meta($post_id, 'image_links', true)) {
+            update_post_meta($post_id, '_manga_manual_override', '1');
+        }
+        update_post_meta($post_id, 'image_links', $links);
         $ids = isset($_POST['final_image_attachment_ids'])
             ? array_filter(array_map('absint', explode(',', sanitize_text_field(wp_unslash($_POST['final_image_attachment_ids'])))))
             : array();
@@ -778,8 +978,9 @@ function manga_resolve_source_folder($submitted_path, $allow_chapter = false) {
 
     $relative = trim(substr($normalized_path, strlen($base_prefix)), '/');
     $segments = array_values(array_filter(explode('/', $relative), 'strlen'));
-    if ((!$allow_chapter && count($segments) !== 1) || ($allow_chapter && count($segments) < 2)) {
-        return new WP_Error('invalid_manga_path', 'The selected folder has an invalid location.');
+    if ((!$allow_chapter && count($segments) !== 1) ||
+        ($allow_chapter && (count($segments) < 2 || count($segments) > 5))) {
+        return new WP_Error('invalid_manga_path', 'The selected folder has an invalid location or is nested too deeply.');
     }
 
     $series_path = $base_prefix . $segments[0];
@@ -788,8 +989,13 @@ function manga_resolve_source_folder($submitted_path, $allow_chapter = false) {
         return new WP_Error('invalid_manga_path', 'The selected series folder is invalid.');
     }
 
-    if ($allow_chapter && (count($segments) > 3 || (count($segments) === 3 && !preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)\d+(?:\.\d+)?$/iu', $segments[1])))) {
-        return new WP_Error('invalid_manga_path', 'Only chapter folders and one level of volume folders are supported.');
+    if ($allow_chapter) {
+        for ($index = 1; $index < count($segments) - 1; $index++) {
+            $ancestor_path = $base_prefix . implode('/', array_slice($segments, 0, $index + 1));
+            if (!is_dir($ancestor_path) || manga_supported_image_files($ancestor_path)) {
+                return new WP_Error('invalid_manga_path', 'Chapter folders cannot be nested inside another image folder.');
+            }
+        }
     }
 
     return array(
@@ -802,11 +1008,15 @@ function manga_resolve_source_folder($submitted_path, $allow_chapter = false) {
 }
 
 function manga_supported_image_files($folder) {
-    $allowed_extensions = array('jpg', 'jpeg', 'png', 'gif', 'webp');
+    $allowed_extensions = array('jpg', 'jpeg', 'png', 'gif', 'webp', 'avif');
     $files = array();
+    if (!is_dir($folder) || !is_readable($folder)) {
+        return $files;
+    }
     foreach ((array) scandir($folder) as $name) {
         $path = trailingslashit($folder) . $name;
-        if (is_file($path) && is_readable($path) && in_array(strtolower(pathinfo($name, PATHINFO_EXTENSION)), $allowed_extensions, true)) {
+        if (is_file($path) && is_readable($path) && filesize($path) > 0 &&
+            in_array(strtolower(pathinfo($name, PATHINFO_EXTENSION)), $allowed_extensions, true)) {
             $files[] = $path;
         }
     }
@@ -818,10 +1028,14 @@ function manga_supported_image_files($folder) {
 
 /** A chapter code in a filename such as "c011" or "c015#1". */
 function manga_filename_chapter_group($filename) {
-    if (!preg_match('/(?:^|[\s_-])c(\d+(?:\.\d+)?)(?=[\s(_\-.#]|$)/iu', (string) $filename, $matches)) {
-        return '';
+    $filename = manga_normalize_chapter_text((string) $filename);
+    if (preg_match('/(?:^|[\s._-])(?:c|ch(?:apter)?|ep(?:isode)?|cap(?:itulo)?|第|제)\s*[._:#-]*(\d+(?:\.\d+)?)(?=[\s(_\-.#]|$)/iu', $filename, $matches)) {
+        return 'c' . (string) (float) $matches[1];
     }
-    return 'c' . (string) (float) $matches[1];
+    if (preg_match('/(?:^|[\s._-])(\d+(?:\.\d+)?)\s*(?:화|話|章|回)(?=[\s(_\-.#]|$)/u', $filename, $matches)) {
+        return 'c' . (string) (float) $matches[1];
+    }
+    return '';
 }
 
 /** Limit a shared volume folder to the pages belonging to one chapter. */
@@ -872,10 +1086,13 @@ function manga_get_cover_url($manga_id, $size = 'manga-cover-small') {
     return 'https://via.placeholder.com/180x252?text=No+Cover';
 }
 
-/** Resolve imported chapter pages from their original folder, with old saved URLs as fallback. */
+/** Resolve imported chapter pages from their source; manual chapters use saved URLs. */
 function manga_get_chapter_image_urls($chapter_id) {
     $source_path = get_post_meta(absint($chapter_id), 'imported_from_path', true);
-    if ($source_path) {
+    if ($source_path && !get_post_meta(absint($chapter_id), '_manga_manual_override', true)) {
+        $saved_links = get_post_meta(absint($chapter_id), 'image_links', true);
+        $saved_count = is_array($saved_links) ? count(array_filter($saved_links)) :
+            count(array_filter(preg_split('/\r\n|\r|\n/', (string) $saved_links), 'strlen'));
         $resolved = manga_resolve_source_folder($source_path, true);
         if (!is_wp_error($resolved)) {
             $direct_urls = array();
@@ -886,12 +1103,14 @@ function manga_get_chapter_image_urls($chapter_id) {
                     $direct_urls = array();
                     break;
                 }
-                $direct_urls[] = $image_url;
+                clearstatcache(true, $source_file);
+                $mtime = filemtime($source_file);
+                $direct_urls[] = $mtime === false ? $image_url : add_query_arg('v', (string) $mtime, $image_url);
             }
-            if ($direct_urls) {
-                return $direct_urls;
-            }
+            return count($direct_urls) < $saved_count ? array() : $direct_urls;
         }
+        // Saved URLs still point at this same missing source; showing them creates broken pages.
+        return array();
     }
 
     $saved_links = get_post_meta(absint($chapter_id), 'image_links', true);
@@ -952,13 +1171,46 @@ function manga_acquire_import_lock($key) {
     }
     $old = (int) get_option($option);
     if ($old && $old < $now - 300) {
-        delete_option($option);
-        if (add_option($option, $now, '', false)) {
+        // Only remove the value we observed. A second request may have claimed the lock.
+        global $wpdb;
+        $deleted = $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s",
+            $option,
+            (string) $old
+        ));
+        if ($deleted) {
+            wp_cache_delete($option, 'options');
+        }
+        if ($deleted && add_option($option, $now, '', false)) {
             return $option;
         }
     }
     return false;
 }
+
+/** A deliberate permanent deletion must not be undone by the next cron scan. */
+function manga_source_exclusion_key($type, $path, $source_group = '') {
+    return 'manga_source_excluded_' . md5($type . '|' . wp_normalize_path((string) $path) . '|' . $source_group);
+}
+function manga_remember_deleted_import($post_id) {
+    $post = get_post($post_id);
+    if (!$post) {
+        return;
+    }
+    if ($post->post_type === 'chapter') {
+        $path = (string) get_post_meta($post_id, 'imported_from_path', true);
+        if ($path !== '') {
+            update_option(manga_source_exclusion_key('chapter', $path,
+                (string) get_post_meta($post_id, '_manga_source_group', true)), time(), false);
+        }
+    } elseif ($post->post_type === 'manga') {
+        $path = (string) get_post_meta($post_id, '_manga_source_path', true);
+        if ($path !== '') {
+            update_option(manga_source_exclusion_key('series', $path), time(), false);
+        }
+    }
+}
+add_action('before_delete_post', 'manga_remember_deleted_import');
 
 function manga_find_or_create_from_folder($series_path) {
     $resolved = manga_resolve_source_folder($series_path, false);
@@ -1046,9 +1298,10 @@ function manga_reconcile_imported_series($resolved, $canonical_id) {
         if (!in_array($old_id, $ids, true) || !$source_path) {
             return new WP_Error('manga_repair_conflict', 'A chapter has no valid source folder; automatic merge was stopped.');
         }
-        $normalized = wp_normalize_path($source_path);
+        $normalized = wp_normalize_path($source_path) . '|' .
+            (string) get_post_meta($chapter->ID, '_manga_source_group', true);
         if (isset($source_paths[$normalized])) {
-            return new WP_Error('manga_repair_conflict', 'Two chapters use the same source folder; automatic merge was stopped.');
+            return new WP_Error('manga_repair_conflict', 'Two chapters use the same source folder and group; automatic merge was stopped.');
         }
         $source_paths[$normalized] = true;
         $original[$chapter->ID] = $old_id;
@@ -1141,91 +1394,139 @@ function manga_redirect_merged_import() {
 }
 add_action('template_redirect', 'manga_redirect_merged_import', 1);
 function manga_set_cover_from_folder($manga_id, $series_path) {
-    if (get_post_meta($manga_id, '_manga_cover_url', true)) {
+    $saved_url = (string) get_post_meta($manga_id, '_manga_cover_url', true);
+    $saved_source = (string) get_post_meta($manga_id, '_manga_cover_source_path', true);
+    $library_url = trailingslashit(get_manga_base_url());
+    $folder_managed = $saved_source !== '' || ($saved_url !== '' && strpos($saved_url, $library_url) === 0);
+
+    // An explicitly supplied URL is not owned by the folder importer.
+    if ($saved_url !== '' && !$folder_managed) {
         return true;
     }
 
-    foreach (array('cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp') as $cover_name) {
+    $errors = array();
+    foreach (array('cover.avif', 'cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp') as $cover_name) {
         $cover_path = trailingslashit($series_path) . $cover_name;
         if (!is_file($cover_path)) {
             continue;
         }
-        $cover_url = manga_source_file_url($cover_path);
-        if (!is_wp_error($cover_url)) {
-            update_post_meta($manga_id, '_manga_cover_url', $cover_url);
-            return true;
+        clearstatcache(true, $cover_path);
+        if (!is_readable($cover_path) || filesize($cover_path) <= 0) {
+            $errors[] = $cover_name . ' is empty or unreadable';
+            continue;
         }
-        return $cover_url;
+        $cover_url = manga_source_file_url($cover_path);
+        if (is_wp_error($cover_url)) {
+            $errors[] = $cover_url->get_error_message();
+            continue;
+        }
+        $hash = hash_file('sha256', $cover_path);
+        if ($hash === false) {
+            $errors[] = $cover_name . ' could not be fingerprinted';
+            continue;
+        }
+        $versioned_url = add_query_arg('v', substr($hash, 0, 12), $cover_url);
+        update_post_meta($manga_id, '_manga_cover_url', $versioned_url);
+        update_post_meta($manga_id, '_manga_cover_source_path', wp_normalize_path($cover_path));
+        update_post_meta($manga_id, '_manga_cover_hash', $hash);
+        delete_post_meta($manga_id, '_manga_cover_sync_error');
+        return true;
     }
 
+    if ($errors) {
+        $error = implode('; ', $errors);
+        update_post_meta($manga_id, '_manga_cover_sync_error', $error);
+        return new WP_Error('manga_cover_unreadable', $error);
+    }
+    if ($folder_managed) {
+        delete_post_meta($manga_id, '_manga_cover_url');
+        delete_post_meta($manga_id, '_manga_cover_source_path');
+        delete_post_meta($manga_id, '_manga_cover_hash');
+    }
+    delete_post_meta($manga_id, '_manga_cover_sync_error');
     return false;
 }
 
-function manga_scan_chapter_folders($series_path) {
+function manga_scan_chapter_folders_recursive($directory, $series_path, $depth = 0) {
     $chapters = array();
-    if (!is_dir($series_path) || !is_readable($series_path)) {
+    $series_real = realpath($series_path);
+    $directory_real = realpath($directory);
+    if (!$series_real || !$directory_real || !is_dir($directory_real) || !is_readable($directory_real)) {
         return $chapters;
     }
 
-    foreach ((array) scandir($series_path) as $entry) {
-        if ($entry === '.' || $entry === '..') {
-            continue;
-        }
-
-        $entry_path = trailingslashit($series_path) . $entry;
-        if (!is_dir($entry_path)) {
-            continue;
-        }
-
-        $direct_images = manga_supported_image_files($entry_path);
-        if ($direct_images) {
-            $chapters[] = array('name' => $entry, 'path' => $entry_path, 'image_count' => count($direct_images));
-            continue;
-        }
-
-        if (!preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)\d+(?:\.\d+)?$/iu', $entry)) {
-            continue;
-        }
-
-        foreach ((array) scandir($entry_path) as $chapter_entry) {
-            if ($chapter_entry === '.' || $chapter_entry === '..') {
-                continue;
-            }
-            $chapter_path = trailingslashit($entry_path) . $chapter_entry;
-            if (!is_dir($chapter_path)) {
-                continue;
-            }
-            $chapter_images = manga_supported_image_files($chapter_path);
-            if ($chapter_images) {
-                $chapters[] = array(
-                    'name' => $entry . ' ' . $chapter_entry,
-                    'path' => $chapter_path,
-                    'image_count' => count($chapter_images),
-                );
-            }
-        }
+    $series_prefix = trailingslashit(wp_normalize_path($series_real));
+    $directory_normalized = wp_normalize_path($directory_real);
+    if ($directory_normalized !== wp_normalize_path($series_real) && strpos($directory_normalized, $series_prefix) !== 0) {
+        return $chapters;
     }
 
-    usort($chapters, function($a, $b) {
-        $info_a = manga_parse_chapter_title($a['name']);
-        $info_b = manga_parse_chapter_title($b['name']);
-        if ($info_a['volume'] !== $info_b['volume']) {
-            return $info_a['volume'] <=> $info_b['volume'];
+    foreach ((array) scandir($directory_real) as $entry) {
+        if ($entry === '.' || $entry === '..' || strpos($entry, '.') === 0) {
+            continue;
         }
-        if ($info_a['chapter'] !== $info_b['chapter']) {
-            return $info_a['chapter'] <=> $info_b['chapter'];
+        $entry_path = trailingslashit($directory_real) . $entry;
+        if (is_link($entry_path) || !is_dir($entry_path)) {
+            continue;
         }
-        return strnatcasecmp($a['name'], $b['name']);
-    });
+        $entry_real = realpath($entry_path);
+        if (!$entry_real || strpos(wp_normalize_path($entry_real), $series_prefix) !== 0) {
+            continue;
+        }
+
+        $direct_images = manga_supported_image_files($entry_real);
+        if ($direct_images) {
+            $relative = trim(substr(wp_normalize_path($entry_real), strlen($series_prefix)), '/');
+            $parts = array_values(array_filter(explode('/', $relative), 'strlen'));
+            $label = basename($entry_real);
+            for ($index = count($parts) - 2; $index >= 0; $index--) {
+                if (preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*\d+(?:\.\d+)?$/iu', $parts[$index])) {
+                    $label = $parts[$index] . ' ' . $label;
+                    break;
+                }
+            }
+            $chapters[] = array(
+                'name' => $label,
+                'path' => $entry_real,
+                'image_count' => count($direct_images),
+            );
+            continue;
+        }
+
+        // Bound recursion and skip symlinks above to avoid loops and paths escaping the library.
+        if ($depth < 4) {
+            $chapters = array_merge($chapters, manga_scan_chapter_folders_recursive($entry_real, $series_real, $depth + 1));
+        }
+    }
 
     return $chapters;
 }
 
+function manga_scan_chapter_folders($series_path) {
+    if (!is_dir($series_path) || !is_readable($series_path)) {
+        return array();
+    }
+    return manga_scan_chapter_folders_recursive($series_path, $series_path, 0);
+}
+
+/** Build a stable parsing label using the closest explicit volume ancestor, if present. */
+function manga_source_chapter_label($resolved) {
+    $segments = (array) ($resolved['relative_segments'] ?? array());
+    $chapter_name = (string) ($resolved['chapter_name'] ?? '');
+    for ($index = count($segments) - 2; $index >= 1; $index--) {
+        if (preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*\d+(?:\.\d+)?$/iu', $segments[$index])) {
+            return $segments[$index] . ' ' . $chapter_name;
+        }
+    }
+    return $chapter_name;
+}
+
 /** Discover ordinary chapter folders and chapters stored together in volume folders. */
-function manga_scan_auto_chapter_sources($series_path) {
+function manga_scan_auto_chapter_sources($series_path, $only_path = '') {
     $chapters = array();
-    foreach (manga_scan_chapter_folders($series_path) as $folder) {
-        if (!preg_match('/^(?:Vol(?:ume)?\.?\s*|V\s*)(\d+(?:\.\d+)?)$/iu', $folder['name'], $volume_match)) {
+    $folders = $only_path !== '' ? array(array('name' => basename($only_path), 'path' => $only_path)) : manga_scan_chapter_folders($series_path);
+    foreach ($folders as $folder) {
+        if (!preg_match('/^(?:Vol(?:ume)?|Tome|Band|V|巻|卷)[._\s-]*(\d+(?:\.\d+)?)$/iu', $folder['name'], $volume_match)) {
             $folder['source_group'] = '';
             $chapters[] = $folder;
             continue;
@@ -1283,6 +1584,72 @@ function manga_scan_auto_chapter_sources($series_path) {
     return $chapters;
 }
 
+/** List sources the manual importer can safely select, including chapter groups in a volume. */
+function manga_manual_import_sources($series_path) {
+    $sources = manga_scan_auto_chapter_sources($series_path);
+    $paths = array_values(array_unique(array_column($sources, 'path')));
+    if (!$paths) {
+        return array();
+    }
+
+    // Read existing records once instead of querying for each chapter folder.
+    $existing = array();
+    $chapter_ids = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
+        'posts_per_page' => -1,
+        'fields' => 'ids',
+        'meta_query' => array(array(
+            'key' => 'imported_from_path',
+            'value' => $paths,
+            'compare' => 'IN',
+        )),
+        'suppress_filters' => true,
+    ));
+    foreach ($chapter_ids as $chapter_id) {
+        $path = (string) get_post_meta($chapter_id, 'imported_from_path', true);
+        $group = (string) get_post_meta($chapter_id, '_manga_source_group', true);
+        $existing[$path . '|' . $group] = true;
+    }
+
+    $available = array();
+    foreach ($sources as $source) {
+        if (!empty($source['scan_error']) ||
+            isset($existing[$source['path'] . '|' . $source['source_group']])) {
+            continue;
+        }
+        $available[] = $source;
+    }
+    return $available;
+}
+
+function manga_find_auto_source($series_path, $path, $source_group) {
+    foreach (manga_scan_auto_chapter_sources($series_path) as $source) {
+        if ($source['path'] === $path && $source['source_group'] === $source_group &&
+            empty($source['scan_error'])) {
+            return $source;
+        }
+    }
+    return null;
+}
+
+function manga_imported_source_exists($path, $source_group = '') {
+    $chapter_ids = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
+        'posts_per_page' => -1,
+        'fields' => 'ids',
+        'meta_key' => 'imported_from_path',
+        'meta_value' => $path,
+    ));
+    foreach ($chapter_ids as $chapter_id) {
+        if ((string) get_post_meta($chapter_id, '_manga_source_group', true) === $source_group) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /** Validate a saved chapter before treating a path as imported. */
 function manga_imported_chapter_valid($chapter_id, $source_path, $manga_id, $source_group = '') {
     $post = get_post($chapter_id);
@@ -1302,6 +1669,61 @@ function manga_imported_chapter_valid($chapter_id, $source_path, $manga_id, $sou
     $links = get_post_meta($chapter_id, 'image_links', true);
     return is_string($links) && trim($links) !== '';
 }
+
+/** Repair an incomplete record only when its saved path and source group match this folder. */
+function manga_repair_imported_chapter_record($chapter_id, $source_path, $manga_id, $source_group, $numbers) {
+    $post = get_post($chapter_id);
+    if (!$post || $post->post_type !== 'chapter' ||
+        wp_normalize_path((string) get_post_meta($chapter_id, 'imported_from_path', true)) !== wp_normalize_path($source_path) ||
+        (string) get_post_meta($chapter_id, '_manga_source_group', true) !== $source_group) {
+        return new WP_Error('manga_repair_unverified', 'The existing chapter could not be verified as belonging to this source folder.');
+    }
+
+    $status = get_post_status($chapter_id);
+    if (!in_array($status, array('draft', 'publish'), true)) {
+        return new WP_Error('manga_repair_status', 'The existing chapter is not a draft or published post; it was left unchanged.');
+    }
+
+    $files = manga_imported_source_files($source_path, $source_group);
+    if (!$files) {
+        return new WP_Error('manga_repair_images_missing', 'The source folder has no readable images.');
+    }
+
+    $image_urls = array();
+    foreach ($files as $file) {
+        $image_url = manga_source_file_url($file);
+        if (is_wp_error($image_url)) {
+            return $image_url;
+        }
+        $image_urls[] = $image_url;
+    }
+    if (manga_imported_source_files($source_path, $source_group) !== $files) {
+        return new WP_Error('manga_repair_images_changed', 'Images changed during repair; the chapter will be retried on the next sync.');
+    }
+
+    $repair_meta = array(
+        'connected_manga_id' => (int) $manga_id,
+        'volume_number' => (float) $numbers['volume'],
+        'chapter_number' => (float) $numbers['chapter'],
+        'image_links' => implode("\n", $image_urls),
+    );
+    foreach ($repair_meta as $key => $value) {
+        update_post_meta($chapter_id, $key, $value);
+    }
+
+    if (!manga_imported_chapter_valid($chapter_id, $source_path, $manga_id, $source_group)) {
+        return new WP_Error('manga_repair_validation', 'The repaired chapter did not pass validation and needs manual review.');
+    }
+
+    if ($status === 'draft') {
+        $published = wp_update_post(array('ID' => $chapter_id, 'post_status' => 'publish'), true);
+        if (is_wp_error($published) || !$published || get_post_status($chapter_id) !== 'publish') {
+            return new WP_Error('manga_repair_publish', 'The chapter metadata was repaired, but publishing failed.');
+        }
+    }
+
+    return true;
+}
 /** Refresh changed pages in an imported chapter with a recoverable metadata backup. */
 function manga_sync_imported_chapter_images($chapter_id, $source_path, $source_group = '') {
     $files = manga_imported_source_files($source_path, $source_group);
@@ -1311,6 +1733,7 @@ function manga_sync_imported_chapter_images($chapter_id, $source_path, $source_g
     $manifest = array();
     $urls = array();
     foreach ($files as $file) {
+        clearstatcache(true, $file);
         $url = manga_source_file_url($file);
         if (is_wp_error($url)) {
             return $url;
@@ -1322,10 +1745,32 @@ function manga_sync_imported_chapter_images($chapter_id, $source_path, $source_g
     if (manga_imported_source_files($source_path, $source_group) !== $files) {
         return new WP_Error('manga_images_changed', 'Images changed during validation; retry next run.');
     }
+    foreach ($files as $index => $file) {
+        clearstatcache(true, $file);
+        if (filesize($file) !== $manifest[$index][1] || filemtime($file) !== $manifest[$index][2]) {
+            return new WP_Error('manga_images_changed', 'An image changed during validation; retry next run.');
+        }
+    }
     $signature = md5(wp_json_encode($manifest));
     $old_signature = (string) get_post_meta($chapter_id, '_manga_source_image_signature', true);
     $old_links = (string) get_post_meta($chapter_id, 'image_links', true);
     $plain_links = implode("\n", $urls);
+    $old_count = count(array_filter(preg_split('/\r\n|\r|\n/', $old_links), 'strlen'));
+    if ($old_count > count($urls)) {
+        $pending = (array) get_post_meta($chapter_id, '_manga_pending_image_reduction', true);
+        if (($pending['signature'] ?? '') !== $signature) {
+            update_post_meta($chapter_id, '_manga_pending_image_reduction', array(
+                'signature' => $signature,
+                'first_seen' => time(),
+            ));
+            return new WP_Error('manga_images_reduced', 'Some pages disappeared; waiting for another stable scan before changing the saved list.');
+        }
+        if (time() - (int) ($pending['first_seen'] ?? 0) < 300) {
+            return new WP_Error('manga_images_reduced', 'Some pages disappeared; waiting at least five minutes before changing the saved list.');
+        }
+    } else {
+        delete_post_meta($chapter_id, '_manga_pending_image_reduction');
+    }
     if (!$old_signature && $old_links === $plain_links) {
         update_post_meta($chapter_id, '_manga_source_image_signature', $signature);
         return true;
@@ -1369,63 +1814,200 @@ function manga_sync_imported_chapter_images($chapter_id, $source_path, $source_g
     }
     $backup['status'] = 'complete';
     update_option($backup_key, $backup, false);
+    delete_post_meta($chapter_id, '_manga_pending_image_reduction');
     return true;
 }
-/** Run folder discovery often, while letting WordPress do the work in the background. */
-function manga_auto_sync_cron_schedules($schedules) {
-    $schedules['manga_every_fifteen_minutes'] = array(
-        'interval' => 15 * MINUTE_IN_SECONDS,
-        'display' => __('Every 15 minutes', 'manga-theme'),
-    );
-    return $schedules;
-}
-add_filter('cron_schedules', 'manga_auto_sync_cron_schedules');
 
-function manga_schedule_auto_sync() {
-    if (!wp_next_scheduled('manga_auto_sync_library')) {
-        wp_schedule_event(time() + MINUTE_IN_SECONDS, 'manga_every_fifteen_minutes', 'manga_auto_sync_library');
+/** Audit a bounded batch after a complete library scan; absence never deletes a post. */
+function manga_audit_imported_sources() {
+    $batch_size = 100;
+    $offset = max(0, (int) get_option('manga_source_audit_offset', 0));
+    $ids = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => array('publish', 'draft', 'pending', 'private', 'future'),
+        'posts_per_page' => $batch_size,
+        'offset' => $offset,
+        'orderby' => 'ID',
+        'order' => 'ASC',
+        'fields' => 'ids',
+        'meta_query' => array(array('key' => 'imported_from_path', 'compare' => 'EXISTS')),
+    ));
+    $missing = 0;
+    foreach ($ids as $chapter_id) {
+        if (get_post_meta($chapter_id, '_manga_manual_override', true)) {
+            delete_post_meta($chapter_id, '_manga_source_health');
+            delete_post_meta($chapter_id, '_manga_source_missing_checks');
+            continue;
+        }
+        $source_path = (string) get_post_meta($chapter_id, 'imported_from_path', true);
+        $source_group = (string) get_post_meta($chapter_id, '_manga_source_group', true);
+        $resolved = manga_resolve_source_folder($source_path, true);
+        $health = is_wp_error($resolved) ? 'folder_unavailable' :
+            (manga_imported_source_files($resolved['path'], $source_group) ? 'healthy' : 'images_unavailable');
+        if ($health === 'healthy') {
+            delete_post_meta($chapter_id, '_manga_source_health');
+            delete_post_meta($chapter_id, '_manga_source_missing_checks');
+            continue;
+        }
+        $missing++;
+        update_post_meta($chapter_id, '_manga_source_health', $health);
+        update_post_meta($chapter_id, '_manga_source_missing_checks',
+            (int) get_post_meta($chapter_id, '_manga_source_missing_checks', true) + 1);
     }
-    if (get_option('manga_auto_sync_source_groups_version') !== '2' &&
-        wp_schedule_single_event(time() + 10, 'manga_auto_sync_source_groups_backfill')) {
-        update_option('manga_auto_sync_source_groups_version', '2', false);
+    update_option('manga_source_audit_offset', count($ids) === $batch_size ? $offset + $batch_size : 0, false);
+    return array('checked' => count($ids), 'missing' => $missing);
+}
+
+/** Avoid publishing a chapter while its files are still being copied. */
+function manga_new_source_stable($source_path, $source_group, $files, $watcher_verified = false) {
+    if ($watcher_verified) { return true; }
+    $key = 'manga_new_source_' . md5(wp_normalize_path($source_path) . '|' . $source_group);
+    $manifest = array();
+    foreach ($files as $file) {
+        clearstatcache(true, $file);
+        $manifest[] = array(basename($file), filesize($file), filemtime($file));
     }
+    $signature = md5(wp_json_encode($manifest));
+    $pending = get_transient($key);
+    if (!is_array($pending) || ($pending['signature'] ?? '') !== $signature) {
+        set_transient($key, array('signature' => $signature, 'first_seen' => time()), DAY_IN_SECONDS);
+        return false;
+    }
+    return time() - (int) ($pending['first_seen'] ?? 0) >= 300;
 }
-add_action('init', 'manga_schedule_auto_sync', 20);
-function manga_auto_sync_backfill_source_groups() {
-    delete_option('manga_auto_sync_cursor');
-    manga_auto_sync_library();
+
+/** A moved volume chapter may lose its volume label when folders are flattened. */
+function manga_relink_numbers_match($saved_numbers, $numbers) {
+    if ((float) $saved_numbers['chapter'] !== (float) $numbers['chapter']) {
+        return false;
+    }
+    if ((float) $saved_numbers['volume'] === (float) $numbers['volume']) {
+        return true;
+    }
+    return (float) $numbers['volume'] === 0.0 && (float) $saved_numbers['volume'] > 0.0;
 }
-add_action('manga_auto_sync_source_groups_backfill', 'manga_auto_sync_backfill_source_groups');
-add_action('manga_auto_sync_continue', 'manga_auto_sync_library');
+/** Only relink an unambiguous rename with the same page names and chapter number. */
+function manga_relink_renamed_chapter($new_path, $source_group, $numbers, $known_chapter_ids, $diagnostic = false, $watcher_verified = false) {
+    $candidate_ids = array();
+    foreach ($known_chapter_ids as $id) {
+        if (!in_array(get_post_status($id), array('publish', 'draft'), true)) {
+            continue;
+        }
+        $saved_numbers = manga_chapter_numbers_for_post($id);
+        if (manga_relink_numbers_match($saved_numbers, $numbers)) {
+
+            $candidate_ids[] = $id;
+            if (count($candidate_ids) > 1) {
+                return $diagnostic ? new WP_Error('manga_relink_ambiguous',
+                    'Multiple existing posts have this chapter number; review posts #' . implode(', #', $candidate_ids) . ': ' . $new_path) : false;
+            }
+        }
+    }
+    if (count($candidate_ids) !== 1) {
+        return false;
+    }
+    $chapter_id = (int) $candidate_ids[0];
+    $old_path = (string) get_post_meta($chapter_id, 'imported_from_path', true);
+    if ($old_path === '' || is_dir($old_path) ||
+        get_post_meta($chapter_id, '_manga_manual_override', true) ||
+        (string) get_post_meta($chapter_id, '_manga_source_group', true) !== $source_group) {
+        return $diagnostic ? new WP_Error('manga_relink_source_mismatch',
+            'Chapter #' . $chapter_id . ' has the same number, but its saved source is still present, manually overridden, or uses a different image group. Review before importing: ' . $new_path) : false;
+    }
+    $old_links = get_post_meta($chapter_id, 'image_links', true);
+    $files = manga_imported_source_files($new_path, $source_group);
+    if (!is_string($old_links) || !$files) {
+        return $diagnostic ? new WP_Error('manga_relink_images_unverified',
+            'Chapter #' . $chapter_id . ' cannot be relinked because its saved or new image list is empty: ' . $new_path) : false;
+    }
+    $saved_urls = array_values(array_filter(preg_split('/\r\n|\r|\n/', $old_links), 'strlen'));
+    if (count($saved_urls) !== count($files)) {
+        return $diagnostic ? new WP_Error('manga_relink_page_count',
+            'Chapter #' . $chapter_id . ' has ' . count($saved_urls) . ' saved pages, but the new folder has ' . count($files) . '. Review the rename: ' . $new_path) : false;
+    }
+    foreach ($files as $index => $file) {
+        $saved_path = wp_parse_url(trim($saved_urls[$index]), PHP_URL_PATH);
+        if (!$saved_path || rawurldecode(basename($saved_path)) !== basename($file)) {
+            return $diagnostic ? new WP_Error('manga_relink_page_names',
+                'Chapter #' . $chapter_id . ' has different page filenames at page ' . ($index + 1) . '. Review the rename: ' . $new_path) : false;
+        }
+    }
+    if (!manga_new_source_stable($new_path, $source_group, $files, $watcher_verified)) {
+        return new WP_Error('manga_relink_waiting', 'Possible renamed chapter is waiting for a stable second scan: ' . $new_path);
+    }
+    update_post_meta($chapter_id, 'imported_from_path', $new_path);
+    if ((string) get_post_meta($chapter_id, 'imported_from_path', true) !== (string) $new_path) {
+        return new WP_Error('manga_relink_failed', 'Could not save the renamed chapter folder: ' . $new_path);
+    }
+    $updated = manga_sync_imported_chapter_images($chapter_id, $new_path, $source_group);
+    if (is_wp_error($updated)) {
+        update_post_meta($chapter_id, 'imported_from_path', $old_path);
+        return $updated;
+    }
+    delete_post_meta($chapter_id, '_manga_source_health');
+    delete_post_meta($chapter_id, '_manga_source_missing_checks');
+    delete_transient('manga_new_source_' . md5(wp_normalize_path($new_path) . '|' . $source_group));
+    mark_chapter_as_imported($new_path);
+    return true;
+}
+/** Event imports replace the legacy timed full-library scans. */
+function manga_disable_legacy_auto_sync_schedule() {
+    if (get_option('manga_event_import_schedule_removed') === '1') {
+        return;
+    }
+    wp_clear_scheduled_hook('manga_auto_sync_library');
+    wp_clear_scheduled_hook('manga_auto_sync_continue');
+    wp_clear_scheduled_hook('manga_auto_sync_source_groups_backfill');
+    update_option('manga_event_import_schedule_removed', '1', false);
+}
+add_action('init', 'manga_disable_legacy_auto_sync_schedule', 20);
 
 /** Discover new manga folders and publish new chapter records without copying images. */
-function manga_auto_sync_library() {
+function manga_auto_sync_library($watcher_relative_path = '', $watcher_limit = 1) {
+    $watcher_mode = is_string($watcher_relative_path) && $watcher_relative_path !== '';
     $sync_lock = manga_acquire_import_lock('automatic-library-sync');
     if (!$sync_lock) {
-        return;
+        return array('busy' => true);
     }
 
     $started_at = time();
+    $started_at_micro = microtime(true);
+    $watcher_limit = max(1, min(8, (int) $watcher_limit));
     $created_manga = 0;
     $created_chapters = 0;
+    $repaired_chapters = 0;
     $scanned_manga = 0;
     $continue_sync = false;
     $sync_errors = array();
     $base_path = get_manga_base_directory();
-    $series_folders = is_dir($base_path) ? scandir($base_path) : array();
+    $series_folders = is_dir($base_path) && is_readable($base_path) ? scandir($base_path) : false;
+    if ($series_folders === false) {
+        delete_option($sync_lock);
+        update_option('manga_auto_sync_status', array(
+            'last_run' => current_time('mysql'),
+            'errors' => array('Manga library is missing or unreadable; no posts were changed.'),
+        ), false);
+        return array('error' => 'Manga library is missing or unreadable.');
+    }
     $cursor = get_option('manga_auto_sync_cursor', array('series' => 0, 'chapter' => 0));
     $cursor_series = max(0, (int) ($cursor['series'] ?? 0));
     $cursor_chapter = max(0, (int) ($cursor['chapter'] ?? 0));
+    $previous_status = ($cursor_series || $cursor_chapter)
+        ? get_option('manga_auto_sync_status', array()) : array();
+    $previous_errors = is_array($previous_status) ? (array) ($previous_status['errors'] ?? array()) : array();
     $next_cursor = array('series' => 0, 'chapter' => 0);
 
+    $watcher_segments = $watcher_mode ? explode('/', trim($watcher_relative_path, '/')) : array();
+    $watcher_path = $watcher_mode ? wp_normalize_path(trailingslashit($base_path) . implode('/', $watcher_segments)) : '';
     foreach ((array) $series_folders as $series_index => $series_folder) {
-        if ($series_index < $cursor_series) {
+        if ((!$watcher_mode && $series_index < $cursor_series) ||
+            ($watcher_mode && $series_folder !== $watcher_segments[0])) {
             continue;
         }
         if ($series_folder === '.' || $series_folder === '..' || strpos($series_folder, '.') === 0) {
             continue;
         }
-        if (time() - $started_at >= 18 || $created_chapters >= 30) {
+        if (!$watcher_mode && (time() - $started_at >= 18 || $created_chapters >= 30)) {
             $continue_sync = true;
             $next_cursor = array('series' => $series_index, 'chapter' => 0);
             break;
@@ -1440,6 +2022,9 @@ function manga_auto_sync_library() {
         if (is_wp_error($resolved_series)) {
             continue;
         }
+        if (get_option(manga_source_exclusion_key('series', $resolved_series['series_path']))) {
+            continue;
+        }
 
         $existing_manga = manga_imported_series_matches($resolved_series);
         $manga_id = manga_find_or_create_from_folder($resolved_series['path']);
@@ -1450,13 +2035,20 @@ function manga_auto_sync_library() {
         if (!$existing_manga) {
             $created_manga++;
         }
+        $cover_error = (string) get_post_meta($manga_id, '_manga_cover_sync_error', true);
+        if ($cover_error !== '') {
+            $sync_errors[] = 'Cover needs attention for ' . $resolved_series['series_name'] . ': ' . $cover_error;
+        }
         $scanned_manga++;
+        $known_chapter_ids = null;
 
-        foreach (manga_scan_auto_chapter_sources($resolved_series['path']) as $chapter_index => $chapter_folder) {
-            if ($series_index === $cursor_series && $chapter_index < $cursor_chapter) {
+        foreach (manga_scan_auto_chapter_sources($resolved_series['path'], $watcher_path) as $chapter_index => $chapter_folder) {
+            if ($watcher_mode && wp_normalize_path($chapter_folder['path']) !== $watcher_path) { continue; }
+            if (!$watcher_mode && $series_index === $cursor_series && $chapter_index < $cursor_chapter) {
                 continue;
             }
-            if (time() - $started_at >= 18 || $created_chapters >= 30) {
+            if (($watcher_mode && ($created_chapters >= $watcher_limit || microtime(true) - $started_at_micro >= 12)) ||
+                (!$watcher_mode && (time() - $started_at >= 18 || $created_chapters >= 30))) {
                 $continue_sync = true;
                 $next_cursor = array('series' => $series_index, 'chapter' => $chapter_index);
                 break 2;
@@ -1469,27 +2061,61 @@ function manga_auto_sync_library() {
 
             $chapter_path = $chapter_folder['path'];
             $source_group = $chapter_folder['source_group'];
+            if (get_option(manga_source_exclusion_key('chapter', $chapter_path, $source_group))) {
+                continue;
+            }
+            $chapter_lock = manga_acquire_import_lock('chapter:' . $chapter_path . '|' . $source_group);
+            if (!$chapter_lock) {
+                $sync_errors[] = 'Chapter is currently being imported; retry next scan: ' . $chapter_path;
+                continue;
+            }
+            try {
             // Cache entries can outlive failed writes; verify the post itself.
             $resolved_chapter = manga_resolve_source_folder($chapter_path, true);
             if (is_wp_error($resolved_chapter)) {
                 continue;
             }
 
+            $chapter_label = $source_group !== ''
+                ? $chapter_folder['name']
+                : manga_source_chapter_label($resolved_chapter);
+            $numbers = manga_parse_chapter_title($chapter_label);
+            $filename_candidate = array();
+            if ($numbers['chapter'] <= 0 && $source_group !== 'volume') {
+                $filename_candidate = manga_infer_chapter_from_filenames(
+                    manga_imported_source_files($resolved_chapter['path'], $source_group)
+                );
+                if (!empty($filename_candidate['chapter'])) {
+                    $numbers['chapter'] = (float) $filename_candidate['chapter'];
+                    $numbers['confidence'] = $filename_candidate['confidence'];
+                    $numbers['source'] = $filename_candidate['source'];
+                    $chapter_label .= ' - Ch. ' . $numbers['chapter'];
+                }
+            }
+            $chapter_number_ready = $numbers['chapter'] > 0 ||
+                ($source_group === 'volume' && $numbers['volume'] > 0);
+            $chapter_auto_confident = $source_group === 'volume' ||
+                ($numbers['confidence'] ?? 'none') === 'high';
+
             $existing_by_path = get_posts(array(
                 'post_type' => 'chapter',
-                'post_status' => 'any',
+                'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
                 'posts_per_page' => -1,
+                'fields' => 'ids',
                 'meta_key' => 'imported_from_path',
                 'meta_value' => $resolved_chapter['path'],
             ));
             $existing_id = 0;
-            foreach ($existing_by_path as $existing_post) {
-                if ((string) get_post_meta($existing_post->ID, '_manga_source_group', true) === $source_group) {
-                    $existing_id = (int) $existing_post->ID;
+            foreach ($existing_by_path as $candidate_id) {
+                if ((string) get_post_meta($candidate_id, '_manga_source_group', true) === $source_group) {
+                    $existing_id = (int) $candidate_id;
                     break;
                 }
             }
             if ($existing_id) {
+                if (get_post_meta($existing_id, '_manga_manual_override', true)) {
+                    continue;
+                }
                 if (manga_imported_chapter_valid($existing_id, $resolved_chapter['path'], $manga_id, $source_group)) {
                     if (get_post_status($existing_id) === 'draft') {
                         wp_update_post(array('ID' => $existing_id, 'post_status' => 'publish'));
@@ -1504,31 +2130,81 @@ function manga_auto_sync_library() {
                         continue;
                     }
                 }
-                $sync_errors[] = 'Incomplete existing chapter record: ' . $resolved_chapter['path'];
+                if (!$chapter_number_ready || !$chapter_auto_confident) {
+                    $sync_errors[] = 'Existing chapter needs a verified number before repair: ' . $resolved_chapter['path'];
+                    continue;
+                }
+                $repair = manga_repair_imported_chapter_record(
+                    $existing_id,
+                    $resolved_chapter['path'],
+                    $manga_id,
+                    $source_group,
+                    $numbers
+                );
+                if (is_wp_error($repair)) {
+                    $sync_errors[] = $repair->get_error_message() . ' ' . $resolved_chapter['path'];
+                    continue;
+                }
+                $image_update = manga_sync_imported_chapter_images($existing_id, $resolved_chapter['path'], $source_group);
+                if (is_wp_error($image_update)) {
+                    $sync_errors[] = $image_update->get_error_message() . ' ' . $resolved_chapter['path'];
+                } else {
+                    mark_chapter_as_imported($resolved_chapter['path']);
+                    $repaired_chapters++;
+                }
                 continue;
             }
 
-            $volume_label = count($resolved_chapter['relative_segments']) === 3
-                ? $resolved_chapter['relative_segments'][1] . ' '
-                : '';
-            $chapter_label = $source_group !== ''
-                ? $chapter_folder['name']
-                : trim($volume_label . $resolved_chapter['chapter_name']);
-            $numbers = manga_parse_chapter_title($chapter_label);
-            if ($numbers['chapter'] <= 0 && !($source_group === 'volume' && $numbers['volume'] > 0)) {
+            if (!$chapter_number_ready) {
+                $sync_errors[] = (!empty($numbers['ambiguous']) || !empty($filename_candidate['ambiguous'])
+                    ? 'Chapter number is ambiguous and needs review: '
+                    : 'Could not determine a chapter number safely: ') . $resolved_chapter['path'];
+                continue;
+            }
+            if (!$chapter_auto_confident) {
+                $sync_errors[] = 'Chapter number candidate needs manual confirmation (' . $numbers['chapter'] . '): ' . $resolved_chapter['path'];
+                continue;
+            }
+
+            if ($known_chapter_ids === null) {
+                $known_chapter_ids = get_posts(array(
+                    'post_type' => 'chapter',
+                    'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
+                    'posts_per_page' => -1,
+                    'fields' => 'ids',
+                    'meta_query' => array(array('key' => 'connected_manga_id', 'value' => $manga_id)),
+                ));
+            }
+
+            $relinked = manga_relink_renamed_chapter($resolved_chapter['path'], $source_group, $numbers, $known_chapter_ids, true, $watcher_mode);
+            if (is_wp_error($relinked)) {
+                $sync_errors[] = $relinked->get_error_message();
+                continue;
+            }
+            if ($relinked) {
+                $repaired_chapters++;
                 continue;
             }
 
             $chapter_title = $resolved_series['series_name'] . ' - ' . $chapter_label;
             $existing_by_title = get_posts(array(
                 'post_type' => 'chapter',
-                'post_status' => 'any',
+                'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
                 'posts_per_page' => 1,
                 'title' => $chapter_title,
                 'meta_query' => array(array('key' => 'connected_manga_id', 'value' => $manga_id, 'compare' => '=')),
             ));
             if ($existing_by_title) {
                 $sync_errors[] = 'Chapter title conflicts with another source folder: ' . $resolved_chapter['path'];
+                continue;
+            }
+
+            // A renamed folder must not silently create a second chapter with the same number.
+            $number_conflict = manga_find_chapter_number_conflict($manga_id, $numbers, $known_chapter_ids);
+            if ($number_conflict) {
+                $sync_errors[] = 'Chapter ' . $numbers['chapter'] . ' conflicts with existing post #' . $number_conflict .
+                    ' (source: ' . (string) get_post_meta($number_conflict, 'imported_from_path', true) .
+                    '); review before importing: ' . $resolved_chapter['path'];
                 continue;
             }
 
@@ -1545,6 +2221,10 @@ function manga_auto_sync_library() {
             if (!$image_urls) {
                 continue;
             }
+            if (!manga_new_source_stable($resolved_chapter['path'], $source_group, $source_files, $watcher_mode)) {
+                $sync_errors[] = 'New chapter is waiting for a stable second scan: ' . $resolved_chapter['path'];
+                continue;
+            }
 
             $chapter_id = wp_insert_post(array(
                 'post_title' => $chapter_title,
@@ -1554,6 +2234,8 @@ function manga_auto_sync_library() {
                     'connected_manga_id' => $manga_id,
                     'volume_number' => $numbers['volume'],
                     'chapter_number' => $numbers['chapter'],
+                    '_manga_chapter_parse_source' => $numbers['source'] ?? '',
+                    '_manga_chapter_parse_confidence' => $numbers['confidence'] ?? 'none',
                     'image_links' => implode("\n", $image_urls),
                     'image_attachment_ids' => array(),
                     'imported_from_path' => $resolved_chapter['path'],
@@ -1561,6 +2243,10 @@ function manga_auto_sync_library() {
                     'import_date' => current_time('mysql'),
                 ),
             ), true);
+
+            if (!is_wp_error($chapter_id) && $chapter_id) {
+                $known_chapter_ids[] = (int) $chapter_id;
+            }
 
             if (is_wp_error($chapter_id) || !$chapter_id ||
                 !manga_imported_chapter_valid($chapter_id, $resolved_chapter['path'], $manga_id, $source_group) ||
@@ -1574,14 +2260,25 @@ function manga_auto_sync_library() {
                 continue;
             }
             mark_chapter_as_imported($resolved_chapter['path']);
+            delete_transient('manga_new_source_' . md5(wp_normalize_path($resolved_chapter['path']) . '|' . $source_group));
             $created_chapters++;
+            } finally {
+                delete_option($chapter_lock);
+            }
         }
     }
 
+    if ($watcher_mode) {
+        delete_option($sync_lock);
+        return array('busy' => false, 'created' => $created_chapters, 'repaired' => $repaired_chapters,
+            'more' => $continue_sync, 'errors' => array_slice($sync_errors, 0, 5),
+            'duration_ms' => (int) round((microtime(true) - $started_at_micro) * 1000));
+    }
     if ($continue_sync) {
         update_option('manga_auto_sync_cursor', $next_cursor, false);
     } else {
         delete_option('manga_auto_sync_cursor');
+        $source_audit = manga_audit_imported_sources();
     }
     delete_option($sync_lock);
     update_option('manga_auto_sync_status', array(
@@ -1589,21 +2286,131 @@ function manga_auto_sync_library() {
         'manga_scanned' => $scanned_manga,
         'manga_created' => $created_manga,
         'chapters_created' => $created_chapters,
+        'chapters_repaired' => $repaired_chapters,
         'continued' => $continue_sync,
-        'errors' => array_slice($sync_errors, 0, 20),
+        'source_audit' => $source_audit ?? array(),
+        'errors' => array_slice(array_merge($previous_errors, $sync_errors), 0, 20),
+        'errors_truncated' => !empty($previous_status['errors_truncated']) || count($previous_errors) + count($sync_errors) > 20,
     ), false);
 
-    if ($continue_sync && !wp_next_scheduled('manga_auto_sync_continue')) {
-        wp_schedule_single_event(time() + MINUTE_IN_SECONDS, 'manga_auto_sync_continue');
-    }
 }
 add_action('manga_auto_sync_library', 'manga_auto_sync_library');
+
+/** Summarize the newest published import for each folder without scanning image trees. */
+function manga_folder_import_latest_chapters($manga_folders, $base_path) {
+    global $wpdb;
+    if (!$manga_folders) {
+        return array();
+    }
+
+    $folder_names = array_fill_keys($manga_folders, true);
+    $base_real = realpath($base_path);
+    $base_prefix = trailingslashit(wp_normalize_path($base_real ?: $base_path));
+    $identity_to_folder = array();
+    foreach ($manga_folders as $folder) {
+        $identity_to_folder[manga_import_identity($folder)] = $folder;
+    }
+
+    $manga_posts = get_posts(array(
+        'post_type' => 'manga',
+        'post_status' => array('publish', 'draft', 'private', 'pending', 'future'),
+        'posts_per_page' => -1,
+        'manga_include_merged' => true,
+        'suppress_filters' => true,
+    ));
+    $id_to_folder = array();
+    foreach ($manga_posts as $post) {
+        $saved_source = (string) get_post_meta($post->ID, '_manga_source_path', true);
+        if ($saved_source !== '') {
+            $normalized = wp_normalize_path($saved_source);
+            if (strpos($normalized, $base_prefix) !== 0) {
+                continue;
+            }
+            $relative = substr($normalized, strlen($base_prefix));
+            if (isset($folder_names[$relative]) && strpos($relative, '/') === false) {
+                $id_to_folder[(int) $post->ID] = $relative;
+            }
+            continue;
+        }
+        $marker = 'Imported from folder: ';
+        if (strpos($post->post_content, $marker) === 0) {
+            $identity = manga_import_identity(substr($post->post_content, strlen($marker)));
+            if (isset($identity_to_folder[$identity]) &&
+                manga_import_identity($post->post_title) === $identity) {
+                $id_to_folder[(int) $post->ID] = $identity_to_folder[$identity];
+            }
+        }
+    }
+    if (!$id_to_folder) {
+        return array();
+    }
+
+    $manga_ids = array_keys($id_to_folder);
+    $placeholders = implode(',', array_fill(0, count($manga_ids), '%d'));
+    $latest_rows = $wpdb->get_results($wpdb->prepare(
+        "SELECT CAST(connection.meta_value AS UNSIGNED) AS manga_id, MAX(chapter.ID) AS chapter_id
+         FROM {$wpdb->posts} chapter
+         INNER JOIN {$wpdb->postmeta} connection ON connection.post_id = chapter.ID
+         WHERE chapter.post_type = 'chapter' AND chapter.post_status = 'publish'
+           AND connection.meta_key = 'connected_manga_id'
+           AND CAST(connection.meta_value AS UNSIGNED) IN ($placeholders)
+         GROUP BY CAST(connection.meta_value AS UNSIGNED)",
+        $manga_ids
+    ));
+
+    $latest_ids = array();
+    foreach ((array) $latest_rows as $row) {
+        $manga_id = (int) $row->manga_id;
+        if (!isset($id_to_folder[$manga_id])) {
+            continue;
+        }
+        $folder = $id_to_folder[$manga_id];
+        $chapter_id = (int) $row->chapter_id;
+        if ($chapter_id > ($latest_ids[$folder] ?? 0)) {
+            $latest_ids[$folder] = $chapter_id;
+        }
+    }
+    if (!$latest_ids) {
+        return array();
+    }
+
+    $chapter_posts = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => 'publish',
+        'post__in' => array_values($latest_ids),
+        'posts_per_page' => -1,
+        'suppress_filters' => true,
+    ));
+    $chapters_by_id = array();
+    foreach ($chapter_posts as $post) {
+        $chapters_by_id[(int) $post->ID] = $post;
+    }
+    $status = array();
+    foreach ($latest_ids as $folder => $chapter_id) {
+        if (isset($chapters_by_id[$chapter_id])) {
+            $status[$folder] = array(
+                'id' => $chapter_id,
+                'label' => manga_chapter_display_label($chapter_id),
+                'date' => get_the_date('d M Y, H:i', $chapter_id),
+            );
+        }
+    }
+    return $status;
+}
 
 // Render the import page
 function render_folder_import_page() {
     $base_path = get_manga_base_directory();
     $base_url = get_manga_base_url();
-    $auto_sync_status = get_option('manga_auto_sync_status', array());
+    $auto_sync_status = get_option('manga_watcher_status', array());
+    $missing_chapters = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => array('publish', 'draft', 'pending', 'private', 'future'),
+        'posts_per_page' => 20,
+        'meta_key' => '_manga_source_health',
+        'meta_value' => array('missing', 'folder_unavailable', 'images_unavailable'),
+        'meta_compare' => 'IN',
+    ));
     // Folder names may contain spaces, apostrophes, or punctuation; preserve the
     // actual name instead of applying filename sanitization before path lookup.
     $current_manga = isset($_GET['manga']) ? sanitize_text_field(wp_unslash($_GET['manga'])) : '';
@@ -1623,6 +2430,7 @@ function render_folder_import_page() {
             if (is_wp_error($manga_id)) {
                 $import_status = '<div class="notice notice-error"><p>' . esc_html($manga_id->get_error_message()) . '</p></div>';
             } else {
+                delete_option(manga_source_exclusion_key('series', $resolved['series_path']));
                 $import_status = '<div class="notice notice-success"><p>✓ Manga entry is ready: ' . esc_html($resolved['series_name']) . ' (cover imported when available).</p></div>';
             }
         }
@@ -1645,22 +2453,42 @@ function render_folder_import_page() {
     if (is_dir($base_path)) {
         $items = scandir($base_path);
         foreach ($items as $item) {
-            if ($item !== '.' && $item !== '..' && is_dir($base_path . $item)) {
+            if ($item !== '.' && $item !== '..' && strpos($item, '.') !== 0 &&
+                is_dir($base_path . $item)) {
                 $manga_folders[] = $item;
             }
         }
     }
+    $latest_imports = manga_folder_import_latest_chapters($manga_folders, $base_path);
+    usort($manga_folders, function($a, $b) use ($latest_imports) {
+        $a_id = (int) ($latest_imports[$a]['id'] ?? 0);
+        $b_id = (int) ($latest_imports[$b]['id'] ?? 0);
+        return $a_id === $b_id ? strnatcasecmp($a, $b) : $b_id <=> $a_id;
+    });
     ?>
     <div class="wrap">
         <h1>📁 Import from Folder</h1>
         <p>Import manga chapters by linking directly to files in your manga folder. Images are not copied to the Media Library.</p>
-        <p class="description"><strong>Automatic discovery is enabled.</strong> New manga folders and chapter folders are checked every 15 minutes by WordPress Cron.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
+        <p class="description"><strong>Automatic discovery is enabled.</strong> File and folder changes are imported continuously by the Windows watcher.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
         <?php if (!empty($auto_sync_status['errors'])): ?>
-            <div class="notice notice-warning"><p>Automatic sync needs attention:</p><ul>
+            <div class="notice notice-warning"><p>Automatic sync needs attention (last run: <?php echo esc_html((string) ($auto_sync_status['last_run'] ?? 'unknown')); ?><?php echo !empty($auto_sync_status['continued']) ? '; scan in progress' : '; scan complete'; ?>):</p><ul>
                 <?php foreach ((array) $auto_sync_status['errors'] as $sync_error): ?>
                     <li><?php echo esc_html($sync_error); ?></li>
                 <?php endforeach; ?>
+                <?php if (!empty($auto_sync_status['errors_truncated'])): ?><li>More sync warnings exist; the first 20 are shown.</li><?php endif; ?>
             </ul></div>
+        <?php endif; ?>
+        <?php if ($missing_chapters): ?>
+            <div class="notice notice-warning"><p>Some saved chapter sources need review. Posts were kept.</p><details><summary>Review up to 20 affected chapters</summary><ul>
+                <?php foreach ($missing_chapters as $missing_chapter): ?>
+                    <li><a href="<?php echo esc_url(get_edit_post_link($missing_chapter->ID)); ?>"><?php echo esc_html(get_the_title($missing_chapter->ID)); ?></a>
+                        — <?php echo esc_html((string) get_post_meta($missing_chapter->ID, 'imported_from_path', true)); ?>
+                        — <?php echo esc_html(get_post_meta($missing_chapter->ID, '_manga_source_health', true) === 'images_unavailable'
+                            ? 'Folder exists, but no supported readable images were found.'
+                            : 'Saved folder path is unavailable; the images may have moved to a renamed folder.'); ?>
+                        (<?php echo absint(get_post_meta($missing_chapter->ID, '_manga_source_missing_checks', true)); ?> checks)</li>
+                <?php endforeach; ?>
+            </ul></details></div>
         <?php endif; ?>
         
         <div class="notice notice-info">
@@ -1699,17 +2527,19 @@ function render_folder_import_page() {
                     </div>
                 <?php else: ?>
                     <ul style="list-style: none; padding: 0;">
-                        <?php foreach ($manga_folders as $manga): 
-                            $folder_path = $base_path . $manga;
-                            $chapter_count = count(array_filter(manga_scan_chapter_folders($folder_path), function($chapter) {
-                                return !is_chapter_imported($chapter['path']);
-                            }));
-                        ?>
+                        <?php foreach ($manga_folders as $manga): ?>
                             <li style="margin-bottom: 10px;">
                                 <a href="<?php echo esc_url(add_query_arg(array('page' => 'folder-import', 'manga' => $manga), admin_url('admin.php'))); ?>"
                                    style="display: block; padding: 10px; background: <?php echo ($current_manga === $manga) ? '#e94560' : '#f5f5f5'; ?>; color: <?php echo ($current_manga === $manga) ? 'white' : '#333'; ?>; text-decoration: none; border-radius: 6px;">
-                                    📖 <strong><?php echo esc_html($manga); ?></strong>
-                                    <span style="float: right; font-size: 12px;">📄 <?php echo $chapter_count; ?> chapters</span>
+                                    <span style="display: block;">📖 <strong><?php echo esc_html($manga); ?></strong></span>
+                                    <?php if (isset($latest_imports[$manga])): ?>
+                                        <span style="display: block; margin-top: 4px; font-size: 12px; opacity: .9;">
+                                            นำเข้าล่าสุด: <strong><?php echo esc_html($latest_imports[$manga]['label']); ?></strong>
+                                            · <?php echo esc_html($latest_imports[$manga]['date']); ?>
+                                        </span>
+                                    <?php else: ?>
+                                        <span style="display: block; margin-top: 4px; font-size: 12px; opacity: .9;">ยังไม่มีตอนที่เผยแพร่</span>
+                                    <?php endif; ?>
                                 </a>
                             </li>
                         <?php endforeach; ?>
@@ -1726,9 +2556,7 @@ function render_folder_import_page() {
                     $chapters = array();
                     if ($manga_real_path && $base_real_path && dirname($manga_real_path) === $base_real_path) {
                         $manga_path = $manga_real_path;
-                        $chapters = array_values(array_filter(manga_scan_chapter_folders($manga_path), function($chapter) {
-                            return !is_chapter_imported($chapter['path']);
-                        }));
+                        $chapters = manga_manual_import_sources($manga_path);
                     } else {
                         $current_manga = '';
                     }
@@ -1760,18 +2588,32 @@ function render_folder_import_page() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        <?php foreach ($chapters as $chapter): ?>
+                                        <?php foreach ($chapters as $chapter):
+                                            $chapter_preview = manga_parse_chapter_title($chapter['name']);
+                                            if ($chapter_preview['chapter'] <= 0 && $chapter_preview['volume'] <= 0) {
+                                                $filename_preview = manga_infer_chapter_from_filenames(manga_supported_image_files($chapter['path']));
+                                                if (!empty($filename_preview['chapter'])) {
+                                                    $chapter_preview['chapter'] = $filename_preview['chapter'];
+                                                    $chapter_preview['confidence'] = $filename_preview['confidence'];
+                                                    $chapter_preview['source'] = $filename_preview['source'];
+                                                }
+                                            }
+                                            $preview_label = $chapter_preview['chapter'] > 0
+                                                ? 'Chapter ' . $chapter_preview['chapter']
+                                                : ($chapter_preview['volume'] > 0 ? 'Volume ' . $chapter_preview['volume'] : 'Number needs review');
+                                        ?>
                                             <tr>
                                                 <td>
                                                     <input type="checkbox" name="selected_chapters[]" value="<?php echo esc_attr($chapter['path']); ?>" 
-                                                           class="chapter-checkbox">
+                                                     data-group="<?php echo esc_attr($chapter['source_group']); ?>" class="chapter-checkbox">
                                                 </td>
                                                 <td>
                                                     <strong><?php echo esc_html($chapter['name']); ?></strong>
+                                                    <br><small><?php echo esc_html($preview_label); ?> · <?php echo esc_html($chapter_preview['confidence']); ?> confidence · <?php echo esc_html($chapter_preview['source'] ?: 'no reliable evidence'); ?></small>
                                                   </td>
                                                   <td><?php echo $chapter['image_count']; ?> images</td>
                                                   <td>
-                                                    <button type="button" class="button button-small manga-import-single" data-path="<?php echo esc_attr($chapter['path']); ?>" data-name="<?php echo esc_attr($chapter['name']); ?>">Import</button>
+                                                    <button type="button" class="button button-small manga-import-single" data-path="<?php echo esc_attr($chapter['path']); ?>" data-group="<?php echo esc_attr($chapter['source_group']); ?>" data-name="<?php echo esc_attr($chapter['name']); ?>">Import</button>
                                                   </td>
                                               </tr>
                                         <?php endforeach; ?>
@@ -1823,9 +2665,9 @@ function render_folder_import_page() {
             return $.ajax({url: importConfig.ajaxUrl, type: 'POST', data: data});
         }
 
-        function importOne(path, name) {
+        function importOne(path, name, group) {
             $importStatus.removeClass('notice-error notice-success').addClass('notice-info').show().find('p').text('Preparing ' + name + '...');
-            return postImportAction('manga_start_folder_import', {chapter_path: path}).then(function(start) {
+            return postImportAction('manga_start_folder_import', {chapter_path: path, source_group: group}).then(function(start) {
                 if (!start.success) throw new Error(start.data && start.data.message ? start.data.message : 'Could not start import.');
                 var job = start.data;
                 function nextBatch(offset) {
@@ -1844,7 +2686,7 @@ function render_folder_import_page() {
             var $button = $(this);
             if (!window.confirm('Import chapter ' + $button.data('name') + '?')) return;
             $button.prop('disabled', true);
-            importOne($button.data('path'), $button.data('name')).then(function(result) {
+            importOne($button.data('path'), $button.data('name'), $button.attr('data-group')).then(function(result) {
                 $importStatus.removeClass('notice-info').addClass('notice-success').find('p').text(result.message);
                 window.setTimeout(function() { window.location.reload(); }, 900);
             }).catch(function(error) {
@@ -1856,7 +2698,7 @@ function render_folder_import_page() {
         $('#bulkImportForm').on('submit', function(event) {
             event.preventDefault();
             var selected = $('.chapter-checkbox:checked').map(function() {
-                return {path: this.value, name: $(this).closest('tr').find('strong').text()};
+                return {path: this.value, group: $(this).attr('data-group'), name: $(this).closest('tr').find('strong').text()};
             }).get();
             if (!selected.length) {
                 window.alert('Select at least one chapter.');
@@ -1876,7 +2718,7 @@ function render_folder_import_page() {
                     return;
                 }
                 var chapter = selected[index++];
-                importOne(chapter.path, chapter.name).then(function() {
+                importOne(chapter.path, chapter.name, chapter.group).then(function() {
                     completed++;
                     nextChapter();
                 }).catch(function(error) {
@@ -1922,28 +2764,37 @@ function manga_start_folder_import() {
     }
 
     $path = $resolved['path'];
+    $source_group = isset($_POST['source_group']) ? sanitize_text_field(wp_unslash($_POST['source_group'])) : '';
+    $selected_source = manga_find_auto_source($resolved['series_path'], $path, $source_group);
+    if (!$selected_source) {
+        wp_send_json_error(array('message' => 'This chapter source is no longer available. Refresh the folder list.'));
+    }
     // A cache flag alone does not prove that the chapter was committed.
-    $existing_by_path = get_posts(array(
-        'post_type' => 'chapter',
-        'post_status' => 'any',
-        'posts_per_page' => 1,
-        'meta_key' => 'imported_from_path',
-        'meta_value' => $path,
-    ));
-    if ($existing_by_path) {
+    if (manga_imported_source_exists($path, $source_group)) {
         wp_send_json_error(array('message' => 'A chapter record already exists for this folder. Check its status before retrying.'));
     }
 
-    $files = manga_supported_image_files($path);
+    $files = manga_imported_source_files($path, $source_group);
     if (!$files) {
         wp_send_json_error(array('message' => 'No supported images were found in this chapter folder.'));
     }
 
-    $volume_label = count($resolved['relative_segments']) === 3 ? $resolved['relative_segments'][1] . ' ' : '';
-    $chapter_label = trim($volume_label . $resolved['chapter_name']);
+    $chapter_label = $source_group !== '' ? $selected_source['name'] : manga_source_chapter_label($resolved);
     $chapter_numbers = manga_parse_chapter_title($chapter_label);
-    if ($chapter_numbers['chapter'] <= 0) {
-        wp_send_json_error(array('message' => 'Chapter number not recognized. Use Ch. 10, Chapter 10, ตอนที่ 10, or 10 - 10 in the folder name.'));
+    if ($chapter_numbers['chapter'] <= 0 && $source_group !== 'volume') {
+        $filename_candidate = manga_infer_chapter_from_filenames($files);
+        if (!empty($filename_candidate['chapter'])) {
+            $chapter_numbers['chapter'] = (float) $filename_candidate['chapter'];
+            $chapter_numbers['confidence'] = $filename_candidate['confidence'];
+            $chapter_numbers['source'] = $filename_candidate['source'];
+            $chapter_label .= ' - Ch. ' . $chapter_numbers['chapter'];
+        }
+    }
+    if ($chapter_numbers['chapter'] <= 0 && !($source_group === 'volume' && $chapter_numbers['volume'] > 0)) {
+        $reason = !empty($chapter_numbers['ambiguous']) || !empty($filename_candidate['ambiguous'])
+            ? 'Several numbers were found but the chapter number is ambiguous.'
+            : 'No reliable chapter number was found in the folder or image filenames.';
+        wp_send_json_error(array('message' => $reason . ' Rename the folder clearly or review its file naming.'));
     }
 
     $manga_id = manga_find_or_create_from_folder($resolved['series_path']);
@@ -1954,7 +2805,7 @@ function manga_start_folder_import() {
     $chapter_title = $resolved['series_name'] . ' - ' . $chapter_label;
     $existing_by_title = get_posts(array(
         'post_type' => 'chapter',
-        'post_status' => 'any',
+        'post_status' => array('publish', 'draft', 'pending', 'private', 'future', 'trash'),
         'posts_per_page' => 1,
         'title' => $chapter_title,
         'meta_query' => array(array('key' => 'connected_manga_id', 'value' => $manga_id, 'compare' => '=')),
@@ -1962,24 +2813,38 @@ function manga_start_folder_import() {
     if ($existing_by_title) {
         wp_send_json_error(array('message' => 'A chapter with this manga and chapter number already exists.'));
     }
+    $existing_by_number = manga_find_chapter_number_conflict($manga_id, $chapter_numbers);
+    if ($existing_by_number) {
+        wp_send_json_error(array('message' => 'This manga already has that chapter number. Review a possible folder rename.'));
+    }
+
+    $file_manifest = array();
+    foreach ($files as $file) {
+        clearstatcache(true, $file);
+        $file_manifest[] = array(filesize($file), filemtime($file));
+    }
 
     $job_id = wp_generate_uuid4();
     $job = array(
         'user_id' => get_current_user_id(),
         'path' => $path,
+        'source_group' => $source_group,
         'series_path' => $resolved['series_path'],
         'series_name' => $resolved['series_name'],
         'chapter_label' => $chapter_label,
         'chapter_title' => $chapter_title,
         'volume_number' => $chapter_numbers['volume'],
         'chapter_number' => $chapter_numbers['chapter'],
+        'chapter_source' => $chapter_numbers['source'] ?? '',
+        'chapter_confidence' => $chapter_numbers['confidence'] ?? 'none',
         'manga_id' => $manga_id,
         'files' => $files,
+        'file_manifest' => $file_manifest,
         'next_offset' => 0,
         'image_urls' => array(),
     );
     set_transient('manga_import_job_' . get_current_user_id() . '_' . md5($job_id), $job, 2 * HOUR_IN_SECONDS);
-    wp_send_json_success(array('job_id' => $job_id, 'total_images' => count($files)));
+    wp_send_json_success(array('job_id' => $job_id, 'total_images' => count($files), 'chapter_number' => $chapter_numbers['chapter'], 'chapter_source' => $chapter_numbers['source'] ?? '', 'chapter_confidence' => $chapter_numbers['confidence'] ?? 'none'));
 }
 add_action('wp_ajax_manga_start_folder_import', 'manga_start_folder_import');
 
@@ -2018,25 +2883,41 @@ function manga_process_folder_import_batch() {
 
     $resolved = manga_resolve_source_folder($job['path'], true);
     if (is_wp_error($resolved) || $resolved['series_path'] !== $job['series_path'] ||
-        manga_supported_image_files($job['path']) !== $job['files']) {
+        manga_imported_source_files($job['path'], $job['source_group']) !== $job['files']) {
         delete_transient($transient_key);
         wp_send_json_error(array('message' => 'Source files changed during import. Start again; no chapter was published.'));
     }
-    $chapter_lock = manga_acquire_import_lock('chapter:' . $job['path']);
+    if (!manga_find_auto_source($job['series_path'], $job['path'], $job['source_group'])) {
+        delete_transient($transient_key);
+        wp_send_json_error(array('message' => 'The chapter grouping changed during import. Refresh and start again.'));
+    }
+    foreach ($job['files'] as $index => $file) {
+        clearstatcache(true, $file);
+        if (!isset($job['file_manifest'][$index]) ||
+            filesize($file) !== $job['file_manifest'][$index][0] ||
+            filemtime($file) !== $job['file_manifest'][$index][1]) {
+            delete_transient($transient_key);
+            wp_send_json_error(array('message' => 'An image changed during import. Start again; no chapter was published.'));
+        }
+    }
+    $chapter_lock = manga_acquire_import_lock('chapter:' . $job['path'] . '|' . $job['source_group']);
     if (!$chapter_lock) {
         wp_send_json_error(array('message' => 'This chapter is being imported by another request. Retry shortly.'));
     }
-    $existing = get_posts(array(
-        'post_type' => 'chapter',
-        'post_status' => 'any',
-        'posts_per_page' => 1,
-        'meta_key' => 'imported_from_path',
-        'meta_value' => $job['path'],
-    ));
-    if ($existing || get_post_status($job['manga_id']) !== 'publish') {
+    if (manga_imported_source_exists($job['path'], $job['source_group']) ||
+        get_post_status($job['manga_id']) !== 'publish') {
         delete_option($chapter_lock);
         delete_transient($transient_key);
         wp_send_json_error(array('message' => 'The chapter or manga changed during import. Nothing new was published.'));
+    }
+    $number_conflict = manga_find_chapter_number_conflict($job['manga_id'], array(
+        'volume' => $job['volume_number'],
+        'chapter' => $job['chapter_number'],
+    ));
+    if ($number_conflict) {
+        delete_option($chapter_lock);
+        delete_transient($transient_key);
+        wp_send_json_error(array('message' => 'This manga already has that chapter number. Nothing new was published.'));
     }
 
     $chapter_id = wp_insert_post(array(
@@ -2047,14 +2928,17 @@ function manga_process_folder_import_batch() {
             'connected_manga_id' => $job['manga_id'],
             'volume_number' => $job['volume_number'],
             'chapter_number' => $job['chapter_number'],
+            '_manga_chapter_parse_source' => $job['chapter_source'] ?? '',
+            '_manga_chapter_parse_confidence' => $job['chapter_confidence'] ?? 'none',
             'image_links' => implode("\n", $job['image_urls']),
             'image_attachment_ids' => array(),
             'imported_from_path' => $job['path'],
+            '_manga_source_group' => $job['source_group'],
             'import_date' => current_time('mysql'),
         ),
     ), true);
     if (is_wp_error($chapter_id) || !$chapter_id ||
-        !manga_imported_chapter_valid($chapter_id, $job['path'], $job['manga_id'])) {
+        !manga_imported_chapter_valid($chapter_id, $job['path'], $job['manga_id'], $job['source_group'])) {
         delete_option($chapter_lock);
         delete_transient($transient_key);
         wp_send_json_error(array('message' => 'Chapter validation failed. Any incomplete draft was retained for recovery.'));
@@ -2066,8 +2950,11 @@ function manga_process_folder_import_batch() {
         wp_send_json_error(array('message' => 'Publishing failed. The draft was retained for recovery.'));
     }
     mark_chapter_as_imported($job['path']);
+    delete_option(manga_source_exclusion_key('chapter', $job['path'], $job['source_group']));
+    delete_option(manga_source_exclusion_key('series', $job['series_path']));
     delete_option($chapter_lock);
-    delete_transient($transient_key);    wp_send_json_success(array(
+    delete_transient($transient_key);
+    wp_send_json_success(array(
         'done' => true,
         'processed' => $job['next_offset'],
         'message' => sprintf('Imported %s (%d images).', $job['chapter_label'], count($job['image_urls'])),
@@ -2088,7 +2975,8 @@ function ajax_filter_manga_home() {
     
     $args = array(
         'post_type' => 'manga',
-        'posts_per_page' => -1
+        'posts_per_page' => -1,
+        'post_status' => 'publish',
     );
     
     switch ($sort_by) {
@@ -2098,13 +2986,16 @@ function ajax_filter_manga_home() {
             break;
         case 'recent':
         default:
-            $args['orderby'] = 'modified';
-            $args['order'] = 'DESC';
+            // The manga post itself is not modified when a chapter is published.
             break;
     }
     
-    $manga_query = new WP_Query($args);
-    output_manga_grid($manga_query->posts);
+    $manga_posts = get_posts($args);
+    $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_posts, 'ID'));
+    if ($sort_by !== 'alphabetical') {
+        manga_sort_posts_by_latest_chapter($manga_posts, $chapter_groups);
+    }
+    output_manga_grid($manga_posts, $chapter_groups);
     wp_die();
 }
 add_action('wp_ajax_filter_manga_home', 'ajax_filter_manga_home');
@@ -2129,6 +3020,76 @@ function get_latest_chapter_date($manga_id) {
     return get_the_date('Y-m-d H:i:s', $manga_id);
 }
 
+// Fetch chapters for a whole grid with one query instead of one query per manga.
+function manga_chapters_by_manga_ids($manga_ids) {
+    $manga_ids = array_values(array_unique(array_filter(array_map('absint', (array) $manga_ids))));
+    if (!$manga_ids) {
+        return array();
+    }
+
+    $grouped = array_fill_keys($manga_ids, array());
+    $chapters = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => 'publish',
+        'posts_per_page' => -1,
+        'orderby' => 'date',
+        'order' => 'DESC',
+        'meta_query' => array(array(
+            'key' => 'connected_manga_id',
+            'value' => $manga_ids,
+            'compare' => 'IN',
+        )),
+    ));
+    foreach ($chapters as $chapter) {
+        $manga_id = (int) get_post_meta($chapter->ID, 'connected_manga_id', true);
+        if (isset($grouped[$manga_id])) {
+            $grouped[$manga_id][] = $chapter;
+        }
+    }
+    return $grouped;
+}
+
+// Order manga grids by each series' newest published chapter, not the parent post's edit date.
+function manga_sort_posts_by_latest_chapter(&$manga_posts, $chapter_groups) {
+    usort($manga_posts, function($a, $b) use ($chapter_groups) {
+        $chapters_a = $chapter_groups[$a->ID] ?? array();
+        $chapters_b = $chapter_groups[$b->ID] ?? array();
+        $date_a = !empty($chapters_a) ? strtotime($chapters_a[0]->post_date_gmt ?: $chapters_a[0]->post_date) : strtotime($a->post_modified_gmt ?: $a->post_modified);
+        $date_b = !empty($chapters_b) ? strtotime($chapters_b[0]->post_date_gmt ?: $chapters_b[0]->post_date) : strtotime($b->post_modified_gmt ?: $b->post_modified);
+
+        if ($date_a === $date_b) {
+            return (int) $b->ID <=> (int) $a->ID;
+        }
+        return $date_b <=> $date_a;
+    });
+}
+
+// Sort by volume and chapter once per post; the same ordering is used in grids and chapter lists.
+function manga_sort_chapter_posts($chapters) {
+    $sort_values = array();
+    foreach ($chapters as $chapter) {
+        $sort_values[$chapter->ID] = manga_chapter_numbers_for_post($chapter->ID);
+    }
+    usort($chapters, function($a, $b) use ($sort_values) {
+        $numbers_a = $sort_values[$a->ID];
+        $numbers_b = $sort_values[$b->ID];
+        if ($numbers_a['volume'] != $numbers_b['volume']) {
+            return $numbers_b['volume'] <=> $numbers_a['volume'];
+        }
+        if ($numbers_a['chapter'] != $numbers_b['chapter']) {
+            return $numbers_b['chapter'] <=> $numbers_a['chapter'];
+        }
+        return $b->ID <=> $a->ID;
+    });
+    return $chapters;
+}
+
+function manga_sort_chapter_info(&$chapters) {
+    usort($chapters, function($a, $b) {
+        return $b['info']['sort_key'] <=> $a['info']['sort_key'];
+    });
+}
+
 // Helper function to get sorted chapters for a manga (with volume support)
 function get_sorted_chapters_for_manga($manga_id) {
     $chapters = get_posts(array(
@@ -2138,30 +3099,7 @@ function get_sorted_chapters_for_manga($manga_id) {
         'meta_value' => $manga_id,
         'post_status' => 'publish'
     ));
-    
-    // Sort by volume number first, then chapter number
-    usort($chapters, function($a, $b) {
-        $info_a = manga_parse_chapter_title(get_the_title($a->ID));
-        $info_b = manga_parse_chapter_title(get_the_title($b->ID));
-        $vol_a = (float) get_post_meta($a->ID, 'volume_number', true);
-        $vol_b = (float) get_post_meta($b->ID, 'volume_number', true);
-        $chap_a = (float) get_post_meta($a->ID, 'chapter_number', true);
-        $chap_b = (float) get_post_meta($b->ID, 'chapter_number', true);
-        $vol_a = $vol_a > 0 ? $vol_a : $info_a['volume'];
-        $vol_b = $vol_b > 0 ? $vol_b : $info_b['volume'];
-        $chap_a = $chap_a > 0 ? $chap_a : $info_a['chapter'];
-        $chap_b = $chap_b > 0 ? $chap_b : $info_b['chapter'];
-        
-        if ($vol_a != $vol_b) {
-            return $vol_b - $vol_a; // Higher volume first
-        }
-        if ($chap_a != $chap_b) {
-            return $chap_b <=> $chap_a; // Higher chapter first within same volume
-        }
-        return $b->ID <=> $a->ID;
-    });
-    
-    return $chapters;
+    return manga_sort_chapter_posts($chapters);
 }
 
 // Helper function to output manga grid for custom sorted arrays
@@ -2171,6 +3109,7 @@ function output_manga_grid_custom($manga_list) {
         return;
     }
     
+    $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_list, 'ID'));
     echo '<div class="manga-grid">';
     foreach ($manga_list as $manga) {
         $manga_id = $manga->ID;
@@ -2178,7 +3117,7 @@ function output_manga_grid_custom($manga_list) {
         $manga_cover = manga_get_cover_url($manga_id, 'manga-cover-small');
         
         // Get sorted recent chapters
-        $all_chapters = get_sorted_chapters_for_manga($manga_id);
+        $all_chapters = manga_sort_chapter_posts($chapter_groups[$manga_id] ?? array());
         $recent_chapters = array_slice($all_chapters, 0, 3);
         ?>
         <div class="manga-item">
@@ -2224,88 +3163,78 @@ function output_manga_grid_custom($manga_list) {
     echo '</div>';
 }
 
+// Keep the selected letter when switching between archive sort modes.
+function manga_filter_posts_by_letter($posts, $letter) {
+    if (!$letter || $letter === 'all') {
+        return $posts;
+    }
+
+    return array_values(array_filter($posts, function($manga) use ($letter) {
+        return strtoupper(substr(get_the_title($manga->ID), 0, 1)) === strtoupper($letter);
+    }));
+}
+
+function manga_output_archive_page($manga_list, $page, $per_page) {
+    $slice = manga_archive_page_slice($manga_list, $page, $per_page);
+    $total_pages = $slice['total_pages'];
+    $page = $slice['page'];
+    output_manga_grid_custom($slice['items']);
+    if ($total_pages <= 1) {
+        return;
+    }
+    echo '<div class="pagination">';
+    for ($number = 1; $number <= $total_pages; $number++) {
+        if ($number === $page) {
+            echo '<span class="current" aria-current="page">' . esc_html($number) . '</span>';
+        } else {
+            echo '<a href="#" data-page="' . esc_attr($number) . '">' . esc_html($number) . '</a>';
+        }
+    }
+    echo '</div>';
+}
+
+function manga_archive_page_slice($manga_list, $page, $per_page) {
+    $total_pages = (int) ceil(count($manga_list) / $per_page);
+    $page = max(1, min($page, max(1, $total_pages)));
+    return array(
+        'page' => $page,
+        'total_pages' => $total_pages,
+        'items' => array_slice($manga_list, ($page - 1) * $per_page, $per_page),
+    );
+}
+
 // AJAX Filter for Manga Archive
 function ajax_filter_manga() {
     check_ajax_referer('manga_filter_nonce', 'nonce');
     
     $letter = isset($_POST['letter']) ? sanitize_text_field($_POST['letter']) : 'all';
     $sort_by = isset($_POST['sort_by']) ? sanitize_text_field($_POST['sort_by']) : 'alphabetical';
+    $page = isset($_POST['paged']) ? max(1, absint($_POST['paged'])) : 1;
+    $per_page = isset($_POST['page_size']) && (int) $_POST['page_size'] === 24 ? 24 : 20;
     
     $args = array(
         'post_type' => 'manga',
         'posts_per_page' => -1,
-        'post_status' => 'publish'
+        'post_status' => 'publish',
+        'orderby' => 'title',
+        'order' => 'ASC',
     );
-    
-    // Handle sorting
+    $all_manga = manga_filter_posts_by_letter(get_posts($args), $letter);
     switch ($sort_by) {
-        case 'alphabetical':
-            $args['orderby'] = 'title';
-            $args['order'] = 'ASC';
-            break;
         case 'updated':
-            $all_manga = get_posts($args);
-            usort($all_manga, function($a, $b) {
-                $latest_chapter_a = get_latest_chapter_date($a->ID);
-                $latest_chapter_b = get_latest_chapter_date($b->ID);
-                return strtotime($latest_chapter_b) - strtotime($latest_chapter_a);
-            });
-            output_manga_grid_custom($all_manga);
-            wp_die();
+            $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($all_manga, 'ID'));
+            manga_sort_posts_by_latest_chapter($all_manga, $chapter_groups);
             break;
         case 'popular':
-            $all_manga = get_posts($args);
-            usort($all_manga, function($a, $b) {
-                $chapters_a = count(get_posts(array(
-                    'post_type' => 'chapter',
-                    'meta_key' => 'connected_manga_id',
-                    'meta_value' => $a->ID,
-                    'posts_per_page' => -1
-                )));
-                $chapters_b = count(get_posts(array(
-                    'post_type' => 'chapter',
-                    'meta_key' => 'connected_manga_id',
-                    'meta_value' => $b->ID,
-                    'posts_per_page' => -1
-                )));
-                return $chapters_b - $chapters_a;
+            $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($all_manga, 'ID'));
+            usort($all_manga, function($a, $b) use ($chapter_groups) {
+                $count_a = count($chapter_groups[$a->ID] ?? array());
+                $count_b = count($chapter_groups[$b->ID] ?? array());
+                return ($count_b <=> $count_a) ?: strnatcasecmp($a->post_title, $b->post_title);
             });
-            output_manga_grid_custom($all_manga);
-            wp_die();
-            break;
-        default:
-            $args['orderby'] = 'title';
-            $args['order'] = 'ASC';
             break;
     }
-    
-    // Handle letter filtering - ONLY for alphabetical sort
-    if ($sort_by === 'alphabetical' && $letter && $letter !== 'all') {
-        $all_manga = get_posts($args);
-        $filtered_manga = array();
-        foreach ($all_manga as $manga) {
-            $title = get_the_title($manga->ID);
-            $first_letter = strtoupper(substr($title, 0, 1));
-            if ($first_letter === strtoupper($letter)) {
-                $filtered_manga[] = $manga;
-            }
-        }
-        output_manga_grid_custom($filtered_manga);
-        wp_die();
-    } else {
-        $query = new WP_Query($args);
-        if ($query->have_posts()) {
-            echo '<div class="manga-grid">';
-            while ($query->have_posts()) {
-                $query->the_post();
-                get_template_part('template-parts/manga-card');
-            }
-            echo '</div>';
-        } else {
-            echo '<p class="no-results">No manga found.</p>';
-        }
-    }
-    
+    manga_output_archive_page($all_manga, $page, $per_page);
     wp_die();
 }
 add_action('wp_ajax_filter_manga', 'ajax_filter_manga');
@@ -2335,6 +3264,8 @@ function ajax_filter_manga_by_status() {
     }
     
     $manga_query = new WP_Query($args);
+    $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_query->posts, 'ID'));
+    manga_sort_posts_by_latest_chapter($manga_query->posts, $chapter_groups);
     
     if ($manga_query->have_posts()) {
         echo '<div class="manga-grid">';
@@ -2373,6 +3304,8 @@ function ajax_filter_manga_by_genre() {
     );
     
     $manga_query = new WP_Query($args);
+    $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_query->posts, 'ID'));
+    manga_sort_posts_by_latest_chapter($manga_query->posts, $chapter_groups);
     
     if ($manga_query->have_posts()) {
         echo '<div class="manga-grid">';
@@ -2391,12 +3324,15 @@ add_action('wp_ajax_filter_manga_by_genre', 'ajax_filter_manga_by_genre');
 add_action('wp_ajax_nopriv_filter_manga_by_genre', 'ajax_filter_manga_by_genre');
 
 // Helper Functions
-function output_manga_grid($manga_list) {
+function output_manga_grid($manga_list, $chapter_groups = null) {
     if (empty($manga_list)) {
         echo '<p class="no-results">No manga found.</p>';
         return;
     }
     
+    if ($chapter_groups === null) {
+        $chapter_groups = manga_chapters_by_manga_ids(wp_list_pluck($manga_list, 'ID'));
+    }
     echo '<div class="manga-grid">';
     foreach ($manga_list as $manga) {
         $manga_id = $manga->ID;
@@ -2404,7 +3340,7 @@ function output_manga_grid($manga_list) {
         $manga_cover = manga_get_cover_url($manga_id, 'manga-cover-small');
         
         // Get sorted recent chapters
-        $all_chapters = get_sorted_chapters_for_manga($manga_id);
+        $all_chapters = manga_sort_chapter_posts($chapter_groups[$manga_id] ?? array());
         $recent_chapters = array_slice($all_chapters, 0, 3);
         ?>
         <div class="manga-item">
@@ -2452,7 +3388,7 @@ function output_manga_grid($manga_list) {
 
 // Enqueue Scripts
 function manga_theme_scripts() {
-    wp_enqueue_style('manga-theme-style', get_stylesheet_uri(), array(), '6.2');
+    wp_enqueue_style('manga-theme-style', get_stylesheet_uri(), array(), (string) filemtime(get_stylesheet_directory() . '/style.css'));
     wp_enqueue_script('jquery');
 }
 add_action('wp_enqueue_scripts', 'manga_theme_scripts');
@@ -2491,4 +3427,57 @@ function ensure_chapter_number_saved($post_id, $post) {
     }
 }
 
-?>
+
+
+/** Signed entry point for the event queue; one importer request holds the global lock. */
+function manga_watcher_sync_request($request) {
+    if (!defined('MANGA_WATCHER_SECRET') || strlen((string) MANGA_WATCHER_SECRET) < 32) {
+        return new WP_Error('watcher_unconfigured', 'Watcher is not configured.', array('status' => 503));
+    }
+    $relative = (string) $request->get_param('path');
+    $timestamp = (int) $request->get_param('timestamp');
+    $raw_limit = $request->get_param('limit');
+    $limit = $raw_limit === null ? 1 : (int) $raw_limit;
+    $signature = (string) $request->get_header('x-manga-signature');
+    if ($limit < 1 || $limit > 8 || abs(time() - $timestamp) > 60 ||
+        !preg_match('/^[a-f0-9]{64}$/D', $signature)) {
+        return new WP_Error('watcher_unauthorized', 'Invalid watcher request.', array('status' => 403));
+    }
+    $message = $timestamp . "\n" . $relative . ($raw_limit === null ? '' : "\n" . $limit);
+    if (!hash_equals(hash_hmac('sha256', $message, MANGA_WATCHER_SECRET), $signature)) {
+        return new WP_Error('watcher_unauthorized', 'Invalid watcher signature.', array('status' => 403));
+    }
+    $parts = explode('/', $relative);
+    if (count($parts) < 2 || count($parts) > 5 ||
+        array_filter($parts, function($part) { return $part === '' || $part === '.' || $part === '..' || strpos($part, '\\') !== false; })) {
+        return new WP_Error('watcher_bad_path', 'Invalid chapter path.', array('status' => 400));
+    }
+    $source = manga_resolve_source_folder(trailingslashit(get_manga_base_directory()) . $relative, true);
+    if (is_wp_error($source)) {
+        return new WP_Error('watcher_bad_path', $source->get_error_message(), array('status' => 400));
+    }
+    $result = manga_auto_sync_library($relative, $limit);
+    if (!empty($result['busy'])) {
+        return new WP_Error('watcher_busy', 'Importer is busy; retry shortly.', array('status' => 503));
+    }
+    if (!empty($result['error'])) {
+        return new WP_Error('watcher_failed', $result['error'], array('status' => 503));
+    }
+    update_option('manga_watcher_status', array(
+        'last_run' => current_time('mysql'),
+        'last_path' => $relative,
+        'chapters_created' => (int) ($result['created'] ?? 0),
+        'chapters_repaired' => (int) ($result['repaired'] ?? 0),
+        'continued' => !empty($result['more']),
+        'errors' => (array) ($result['errors'] ?? array()),
+    ), false);
+    return rest_ensure_response($result);
+}
+function manga_register_watcher_route() {
+    register_rest_route('manga/v1', '/watcher-sync', array(
+        'methods' => 'POST',
+        'callback' => 'manga_watcher_sync_request',
+        'permission_callback' => '__return_true',
+    ));
+}
+add_action('rest_api_init', 'manga_register_watcher_route');
