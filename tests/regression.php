@@ -153,6 +153,14 @@ $test_chapter_posts = array();
     check($test_chapter_queries === 1, 'manual source scan uses one chapter query');
     check(count(manga_imported_source_files($volume_one, 'c12')) === 2, 'grouped source files');
     check(manga_parse_chapter_title('Vol. 2')['volume'] === 2.0, 'volume-only number');
+    check(manga_relink_numbers_match(array('volume' => 11, 'chapter' => 53), array('volume' => 0, 'chapter' => 53)),
+        'flat chapter folder can match a moved volume chapter');
+    check(!manga_relink_numbers_match(array('volume' => 11, 'chapter' => 53), array('volume' => 0, 'chapter' => 54)),
+        'moved volume relink requires the exact chapter number');
+    check(!manga_relink_numbers_match(array('volume' => 11, 'chapter' => 53), array('volume' => 10, 'chapter' => 53)),
+        'different explicit volume remains a conflict');
+    check(!manga_relink_numbers_match(array('volume' => 0, 'chapter' => 53), array('volume' => 11, 'chapter' => 53)),
+        'relink does not invent a volume for flat sources');
 
     $test_manga_posts = array(
         (object) array('ID' => 10, 'post_title' => 'Series', 'post_content' => ''),
@@ -206,3 +214,4 @@ $test_chapter_posts = array();
 }
 
 echo "Regression checks passed.\n";
+
