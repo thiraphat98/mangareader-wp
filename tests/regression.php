@@ -214,4 +214,3 @@ $test_chapter_posts = array();
 }
 
 echo "Regression checks passed.\n";
-
