@@ -96,7 +96,7 @@ function Inventory {
         $counts[$countKey] = $children.Count
         if ($depth -ge 2) { $found[$relative] = Manifest $folder }
         if ($depth -lt 5) {
-            foreach ($child in $children) { $stack.Push(@($child.FullName, $depth + 1)) }
+            foreach ($child in $children) { $stack.Push(@($child.FullName, ($depth + 1))) }
         }
     }
     return @{ signatures = $found; counts = $counts }
