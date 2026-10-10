@@ -1,6 +1,6 @@
 param([string]$ConfigPath = (Join-Path $PSScriptRoot 'watcher.json'))
 $ErrorActionPreference = 'Stop'
-$config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+$config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $root = [IO.Path]::GetFullPath([string]$config.library).TrimEnd('\')
 $uri = [string]$config.endpoint
 $secret = [string]$config.secret
@@ -157,7 +157,7 @@ function Send([string]$folder) {
     try { $signature = [BitConverter]::ToString($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($message))).Replace('-','').ToLowerInvariant() }
     finally { $hmac.Dispose() }
     $body = @{ path = $relative; timestamp = $stamp; limit = $script:batchLimit } | ConvertTo-Json -Compress
-    return Invoke-RestMethod -Uri $uri -Method Post -ContentType 'application/json' -Headers @{ 'X-Manga-Signature' = $signature } -Body $body -TimeoutSec 45
+    return Invoke-RestMethod -Uri $uri -Method Post -ContentType 'application/json' -Headers @{ 'X-Manga-Signature' = $signature } -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 45
 }
 function HandleEvent($event) {
     if ($event.SourceIdentifier -eq 'MangaWatcher.Error') {
@@ -199,14 +199,14 @@ function StopWatcher {
 }
 try {
     if (Test-Path -LiteralPath $queuePath) {
-        foreach ($relative in @(Get-Content -LiteralPath $queuePath -Raw | ConvertFrom-Json)) {
+        foreach ($relative in @(Get-Content -LiteralPath $queuePath -Raw -Encoding UTF8 | ConvertFrom-Json)) {
             $folder = Join-Path $root ([string]$relative).Replace('/', '\')
             if (ChapterPath $folder) { Queue $folder $false }
         }
     }
     $hadSnapshot = Test-Path -LiteralPath $snapshotPath
     if ($hadSnapshot) {
-        $stored = Get-Content -LiteralPath $snapshotPath -Raw | ConvertFrom-Json
+        $stored = Get-Content -LiteralPath $snapshotPath -Raw -Encoding UTF8 | ConvertFrom-Json
         foreach ($entry in $stored.signatures.PSObject.Properties) { $script:signatures[$entry.Name] = [string]$entry.Value }
         foreach ($entry in $stored.counts.PSObject.Properties) { $script:folderCounts[$entry.Name] = [int]$entry.Value }
     }
