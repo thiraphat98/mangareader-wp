@@ -1940,35 +1940,20 @@ function manga_relink_renamed_chapter($new_path, $source_group, $numbers, $known
     mark_chapter_as_imported($new_path);
     return true;
 }
-/** Run folder discovery often, while letting WordPress do the work in the background. */
-function manga_auto_sync_cron_schedules($schedules) {
-    $schedules['manga_every_fifteen_minutes'] = array(
-        'interval' => 15 * MINUTE_IN_SECONDS,
-        'display' => __('Every 15 minutes', 'manga-theme'),
-    );
-    return $schedules;
-}
-add_filter('cron_schedules', 'manga_auto_sync_cron_schedules');
-
-function manga_schedule_auto_sync() {
-    if (!wp_next_scheduled('manga_auto_sync_library')) {
-        wp_schedule_event(time() + MINUTE_IN_SECONDS, 'manga_every_fifteen_minutes', 'manga_auto_sync_library');
+/** Event imports replace the legacy timed full-library scans. */
+function manga_disable_legacy_auto_sync_schedule() {
+    if (get_option('manga_event_import_schedule_removed') === '1') {
+        return;
     }
-    if (get_option('manga_auto_sync_source_groups_version') !== '2' &&
-        wp_schedule_single_event(time() + 10, 'manga_auto_sync_source_groups_backfill')) {
-        update_option('manga_auto_sync_source_groups_version', '2', false);
-    }
+    wp_clear_scheduled_hook('manga_auto_sync_library');
+    wp_clear_scheduled_hook('manga_auto_sync_continue');
+    wp_clear_scheduled_hook('manga_auto_sync_source_groups_backfill');
+    update_option('manga_event_import_schedule_removed', '1', false);
 }
-add_action('init', 'manga_schedule_auto_sync', 20);
-function manga_auto_sync_backfill_source_groups() {
-    delete_option('manga_auto_sync_cursor');
-    manga_auto_sync_library();
-}
-add_action('manga_auto_sync_source_groups_backfill', 'manga_auto_sync_backfill_source_groups');
-add_action('manga_auto_sync_continue', 'manga_auto_sync_library');
+add_action('init', 'manga_disable_legacy_auto_sync_schedule', 20);
 
 /** Discover new manga folders and publish new chapter records without copying images. */
-function manga_auto_sync_library($watcher_relative_path = '') {
+function manga_auto_sync_library($watcher_relative_path = '', $watcher_limit = 1) {
     $watcher_mode = is_string($watcher_relative_path) && $watcher_relative_path !== '';
     $sync_lock = manga_acquire_import_lock('automatic-library-sync');
     if (!$sync_lock) {
@@ -1976,6 +1961,8 @@ function manga_auto_sync_library($watcher_relative_path = '') {
     }
 
     $started_at = time();
+    $started_at_micro = microtime(true);
+    $watcher_limit = max(1, min(8, (int) $watcher_limit));
     $created_manga = 0;
     $created_chapters = 0;
     $repaired_chapters = 0;
@@ -2050,7 +2037,7 @@ function manga_auto_sync_library($watcher_relative_path = '') {
             if (!$watcher_mode && $series_index === $cursor_series && $chapter_index < $cursor_chapter) {
                 continue;
             }
-            if (($watcher_mode && $created_chapters >= 1) ||
+            if (($watcher_mode && ($created_chapters >= $watcher_limit || microtime(true) - $started_at_micro >= 12)) ||
                 (!$watcher_mode && (time() - $started_at >= 18 || $created_chapters >= 30))) {
                 $continue_sync = true;
                 $next_cursor = array('series' => $series_index, 'chapter' => $chapter_index);
@@ -2274,7 +2261,8 @@ function manga_auto_sync_library($watcher_relative_path = '') {
     if ($watcher_mode) {
         delete_option($sync_lock);
         return array('busy' => false, 'created' => $created_chapters, 'repaired' => $repaired_chapters,
-            'more' => $continue_sync, 'errors' => array_slice($sync_errors, 0, 5));
+            'more' => $continue_sync, 'errors' => array_slice($sync_errors, 0, 5),
+            'duration_ms' => (int) round((microtime(true) - $started_at_micro) * 1000));
     }
     if ($continue_sync) {
         update_option('manga_auto_sync_cursor', $next_cursor, false);
@@ -2295,9 +2283,6 @@ function manga_auto_sync_library($watcher_relative_path = '') {
         'errors_truncated' => !empty($previous_status['errors_truncated']) || count($previous_errors) + count($sync_errors) > 20,
     ), false);
 
-    if ($continue_sync && !wp_next_scheduled('manga_auto_sync_continue')) {
-        wp_schedule_single_event(time() + MINUTE_IN_SECONDS, 'manga_auto_sync_continue');
-    }
 }
 add_action('manga_auto_sync_library', 'manga_auto_sync_library');
 
@@ -2407,7 +2392,7 @@ function manga_folder_import_latest_chapters($manga_folders, $base_path) {
 function render_folder_import_page() {
     $base_path = get_manga_base_directory();
     $base_url = get_manga_base_url();
-    $auto_sync_status = get_option('manga_auto_sync_status', array());
+    $auto_sync_status = get_option('manga_watcher_status', array());
     $missing_chapters = get_posts(array(
         'post_type' => 'chapter',
         'post_status' => array('publish', 'draft', 'pending', 'private', 'future'),
@@ -2474,7 +2459,7 @@ function render_folder_import_page() {
     <div class="wrap">
         <h1>📁 Import from Folder</h1>
         <p>Import manga chapters by linking directly to files in your manga folder. Images are not copied to the Media Library.</p>
-        <p class="description"><strong>Automatic discovery is enabled.</strong> Changed chapter folders are imported by the Windows file watcher. WordPress also scans every 15 minutes to recover missed file events.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
+        <p class="description"><strong>Automatic discovery is enabled.</strong> File and folder changes are imported continuously by the Windows watcher.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
         <?php if (!empty($auto_sync_status['errors'])): ?>
             <div class="notice notice-warning"><p>Automatic sync needs attention (last run: <?php echo esc_html((string) ($auto_sync_status['last_run'] ?? 'unknown')); ?><?php echo !empty($auto_sync_status['continued']) ? '; scan in progress' : '; scan complete'; ?>):</p><ul>
                 <?php foreach ((array) $auto_sync_status['errors'] as $sync_error): ?>
@@ -3434,16 +3419,22 @@ function ensure_chapter_number_saved($post_id, $post) {
 
 
 
-/** Authenticated, rate-limited entry point for the Windows filesystem watcher. */
+/** Signed entry point for the event queue; one importer request holds the global lock. */
 function manga_watcher_sync_request($request) {
     if (!defined('MANGA_WATCHER_SECRET') || strlen((string) MANGA_WATCHER_SECRET) < 32) {
         return new WP_Error('watcher_unconfigured', 'Watcher is not configured.', array('status' => 503));
     }
     $relative = (string) $request->get_param('path');
     $timestamp = (int) $request->get_param('timestamp');
+    $raw_limit = $request->get_param('limit');
+    $limit = $raw_limit === null ? 1 : (int) $raw_limit;
     $signature = (string) $request->get_header('x-manga-signature');
-    if (abs(time() - $timestamp) > 60 || !preg_match('/^[a-f0-9]{64}$/D', $signature) ||
-        !hash_equals(hash_hmac('sha256', $timestamp . "\n" . $relative, MANGA_WATCHER_SECRET), $signature)) {
+    if ($limit < 1 || $limit > 8 || abs(time() - $timestamp) > 60 ||
+        !preg_match('/^[a-f0-9]{64}$/D', $signature)) {
+        return new WP_Error('watcher_unauthorized', 'Invalid watcher request.', array('status' => 403));
+    }
+    $message = $timestamp . "\n" . $relative . ($raw_limit === null ? '' : "\n" . $limit);
+    if (!hash_equals(hash_hmac('sha256', $message, MANGA_WATCHER_SECRET), $signature)) {
         return new WP_Error('watcher_unauthorized', 'Invalid watcher signature.', array('status' => 403));
     }
     $parts = explode('/', $relative);
@@ -3455,26 +3446,21 @@ function manga_watcher_sync_request($request) {
     if (is_wp_error($source)) {
         return new WP_Error('watcher_bad_path', $source->get_error_message(), array('status' => 400));
     }
-    global $wpdb;
-    $option = 'manga_watcher_last_second';
-    $now = time();
-    if (!add_option($option, $now, '', false)) {
-        $changed = $wpdb->query($wpdb->prepare(
-            "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND CAST(option_value AS UNSIGNED) < %d",
-            (string) $now, $option, $now
-        ));
-        if (!$changed) {
-            return new WP_Error('watcher_rate_limited', 'Retry next second.', array('status' => 429));
-        }
-        wp_cache_delete($option, 'options');
-    }
-    $result = manga_auto_sync_library($relative);
+    $result = manga_auto_sync_library($relative, $limit);
     if (!empty($result['busy'])) {
         return new WP_Error('watcher_busy', 'Importer is busy; retry shortly.', array('status' => 503));
     }
     if (!empty($result['error'])) {
         return new WP_Error('watcher_failed', $result['error'], array('status' => 503));
     }
+    update_option('manga_watcher_status', array(
+        'last_run' => current_time('mysql'),
+        'last_path' => $relative,
+        'chapters_created' => (int) ($result['created'] ?? 0),
+        'chapters_repaired' => (int) ($result['repaired'] ?? 0),
+        'continued' => !empty($result['more']),
+        'errors' => (array) ($result['errors'] ?? array()),
+    ), false);
     return rest_ensure_response($result);
 }
 function manga_register_watcher_route() {
