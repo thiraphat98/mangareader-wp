@@ -12,6 +12,8 @@ $test_manga_posts = array();
 $test_manga_meta = array();
 $test_replace_lock_before_delete = null;
 $test_chapter_queries = 0;
+$test_latest_rows = array();
+$test_chapter_posts = array();
 
 function add_option($key, $value, ...$args) {
     global $test_options;
@@ -24,9 +26,10 @@ function get_option($key, $default = false) {
     return $test_options[$key] ?? $default;
 }
 function get_posts($args) {
-    global $test_chapters, $test_manga_posts, $test_chapter_queries;
+    global $test_chapters, $test_manga_posts, $test_chapter_queries, $test_chapter_posts;
     if (($args['post_type'] ?? '') === 'manga') return $test_manga_posts;
     if (($args['post_type'] ?? '') !== 'chapter') return array();
+    if (isset($args['post__in'])) return array_values(array_intersect_key($test_chapter_posts, array_flip($args['post__in'])));
     $test_chapter_queries++;
     $ids = array();
     foreach ($test_chapters as $id => $meta) {
@@ -48,6 +51,8 @@ function get_post_meta($id, $key, $single = true) {
     global $test_chapters, $test_manga_meta;
     return $test_chapters[$id][$key] ?? $test_manga_meta[$id][$key] ?? '';
 }
+function get_the_title($id) { global $test_chapter_posts; return $test_chapter_posts[$id]->post_title ?? ''; }
+function get_the_date($format, $id) { global $test_chapter_posts; return $test_chapter_posts[$id]->post_date ?? ''; }
 function update_post_meta($id, $key, $value) {
     global $test_chapters, $test_manga_meta;
     if (isset($test_chapters[$id])) $test_chapters[$id][$key] = $value;
@@ -67,6 +72,9 @@ class WP_Error {
 
 class FakeWpdb {
     public $options = 'wp_options';
+    public $posts = 'wp_posts';
+    public $postmeta = 'wp_postmeta';
+    public function get_results($prepared) { global $test_latest_rows; return $test_latest_rows; }
     public function prepare($query, ...$args) { return array($query, $args); }
     public function query($prepared) {
         global $test_options, $test_replace_lock_before_delete;
@@ -138,6 +146,8 @@ try {
     check(count(manga_manual_import_sources($series)) === 3, 'manual importer lists every source');
     $test_chapters[1] = array('imported_from_path' => realpath($volume_one), '_manga_source_group' => 'c11');
     $test_chapter_queries = 0;
+$test_latest_rows = array();
+$test_chapter_posts = array();
     $remaining = manga_manual_import_sources($series);
     check(count($remaining) === 2 && $remaining[0]['source_group'] === 'c12', 'imported group does not hide sibling');
     check($test_chapter_queries === 1, 'manual source scan uses one chapter query');
@@ -165,6 +175,29 @@ try {
     $conflict = manga_reconcile_imported_series($resolved, 10);
     check($conflict instanceof WP_Error && $conflict->code === 'manga_repair_conflict',
         'same folder and group remains a conflict');
+    $test_manga_posts = array(
+        (object) array('ID' => 10, 'post_title' => 'Vol 1', 'post_content' => ''),
+        (object) array('ID' => 20, 'post_title' => 'Vol 2', 'post_content' => 'Imported from folder: Vol 2'),
+    );
+    $test_manga_meta = array(10 => array('_manga_source_path' => wp_normalize_path($volume_one)));
+    $test_chapters = array(
+        301 => array('chapter_number' => 13, 'volume_number' => 0),
+        302 => array('chapter_number' => 0, 'volume_number' => 2),
+    );
+    $test_latest_rows = array(
+        (object) array('manga_id' => 10, 'chapter_id' => 301),
+        (object) array('manga_id' => 20, 'chapter_id' => 302),
+    );
+    $test_chapter_posts = array(
+        301 => (object) array('ID' => 301, 'post_title' => 'Chapter 13', 'post_date' => '2026-10-10 09:00'),
+        302 => (object) array('ID' => 302, 'post_title' => 'Vol. 2', 'post_date' => '2026-10-09 21:00'),
+    );
+    $latest = manga_folder_import_latest_chapters(array('Vol 1', 'Vol 2', 'Unpublished'), $series);
+    check($latest['Vol 1']['label'] === 'Ch. 13' && $latest['Vol 1']['date'] === '2026-10-10 09:00',
+        'admin list shows the latest published chapter and date');
+    check($latest['Vol 2']['label'] === 'Vol. 2' && !isset($latest['Unpublished']),
+        'admin list supports legacy folder identity and unpublished folders');
+
 } finally {
     foreach ($files as $file) unlink($series . '/' . $file);
     rmdir($volume_one);

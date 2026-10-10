@@ -2301,6 +2301,108 @@ function manga_auto_sync_library($watcher_relative_path = '') {
 }
 add_action('manga_auto_sync_library', 'manga_auto_sync_library');
 
+/** Summarize the newest published import for each folder without scanning image trees. */
+function manga_folder_import_latest_chapters($manga_folders, $base_path) {
+    global $wpdb;
+    if (!$manga_folders) {
+        return array();
+    }
+
+    $folder_names = array_fill_keys($manga_folders, true);
+    $base_real = realpath($base_path);
+    $base_prefix = trailingslashit(wp_normalize_path($base_real ?: $base_path));
+    $identity_to_folder = array();
+    foreach ($manga_folders as $folder) {
+        $identity_to_folder[manga_import_identity($folder)] = $folder;
+    }
+
+    $manga_posts = get_posts(array(
+        'post_type' => 'manga',
+        'post_status' => array('publish', 'draft', 'private', 'pending', 'future'),
+        'posts_per_page' => -1,
+        'manga_include_merged' => true,
+        'suppress_filters' => true,
+    ));
+    $id_to_folder = array();
+    foreach ($manga_posts as $post) {
+        $saved_source = (string) get_post_meta($post->ID, '_manga_source_path', true);
+        if ($saved_source !== '') {
+            $normalized = wp_normalize_path($saved_source);
+            if (strpos($normalized, $base_prefix) !== 0) {
+                continue;
+            }
+            $relative = substr($normalized, strlen($base_prefix));
+            if (isset($folder_names[$relative]) && strpos($relative, '/') === false) {
+                $id_to_folder[(int) $post->ID] = $relative;
+            }
+            continue;
+        }
+        $marker = 'Imported from folder: ';
+        if (strpos($post->post_content, $marker) === 0) {
+            $identity = manga_import_identity(substr($post->post_content, strlen($marker)));
+            if (isset($identity_to_folder[$identity]) &&
+                manga_import_identity($post->post_title) === $identity) {
+                $id_to_folder[(int) $post->ID] = $identity_to_folder[$identity];
+            }
+        }
+    }
+    if (!$id_to_folder) {
+        return array();
+    }
+
+    $manga_ids = array_keys($id_to_folder);
+    $placeholders = implode(',', array_fill(0, count($manga_ids), '%d'));
+    $latest_rows = $wpdb->get_results($wpdb->prepare(
+        "SELECT CAST(connection.meta_value AS UNSIGNED) AS manga_id, MAX(chapter.ID) AS chapter_id
+         FROM {$wpdb->posts} chapter
+         INNER JOIN {$wpdb->postmeta} connection ON connection.post_id = chapter.ID
+         WHERE chapter.post_type = 'chapter' AND chapter.post_status = 'publish'
+           AND connection.meta_key = 'connected_manga_id'
+           AND CAST(connection.meta_value AS UNSIGNED) IN ($placeholders)
+         GROUP BY CAST(connection.meta_value AS UNSIGNED)",
+        $manga_ids
+    ));
+
+    $latest_ids = array();
+    foreach ((array) $latest_rows as $row) {
+        $manga_id = (int) $row->manga_id;
+        if (!isset($id_to_folder[$manga_id])) {
+            continue;
+        }
+        $folder = $id_to_folder[$manga_id];
+        $chapter_id = (int) $row->chapter_id;
+        if ($chapter_id > ($latest_ids[$folder] ?? 0)) {
+            $latest_ids[$folder] = $chapter_id;
+        }
+    }
+    if (!$latest_ids) {
+        return array();
+    }
+
+    $chapter_posts = get_posts(array(
+        'post_type' => 'chapter',
+        'post_status' => 'publish',
+        'post__in' => array_values($latest_ids),
+        'posts_per_page' => -1,
+        'suppress_filters' => true,
+    ));
+    $chapters_by_id = array();
+    foreach ($chapter_posts as $post) {
+        $chapters_by_id[(int) $post->ID] = $post;
+    }
+    $status = array();
+    foreach ($latest_ids as $folder => $chapter_id) {
+        if (isset($chapters_by_id[$chapter_id])) {
+            $status[$folder] = array(
+                'id' => $chapter_id,
+                'label' => manga_chapter_display_label($chapter_id),
+                'date' => get_the_date('d M Y, H:i', $chapter_id),
+            );
+        }
+    }
+    return $status;
+}
+
 // Render the import page
 function render_folder_import_page() {
     $base_path = get_manga_base_directory();
@@ -2356,16 +2458,23 @@ function render_folder_import_page() {
     if (is_dir($base_path)) {
         $items = scandir($base_path);
         foreach ($items as $item) {
-            if ($item !== '.' && $item !== '..' && is_dir($base_path . $item)) {
+            if ($item !== '.' && $item !== '..' && strpos($item, '.') !== 0 &&
+                is_dir($base_path . $item)) {
                 $manga_folders[] = $item;
             }
         }
     }
+    $latest_imports = manga_folder_import_latest_chapters($manga_folders, $base_path);
+    usort($manga_folders, function($a, $b) use ($latest_imports) {
+        $a_id = (int) ($latest_imports[$a]['id'] ?? 0);
+        $b_id = (int) ($latest_imports[$b]['id'] ?? 0);
+        return $a_id === $b_id ? strnatcasecmp($a, $b) : $b_id <=> $a_id;
+    });
     ?>
     <div class="wrap">
         <h1>📁 Import from Folder</h1>
         <p>Import manga chapters by linking directly to files in your manga folder. Images are not copied to the Media Library.</p>
-        <p class="description"><strong>Automatic discovery is enabled.</strong> New manga folders and chapter folders are checked every 15 minutes by WordPress Cron.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
+        <p class="description"><strong>Automatic discovery is enabled.</strong> Changed chapter folders are imported by the Windows file watcher. WordPress also scans every 15 minutes to recover missed file events.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
         <?php if (!empty($auto_sync_status['errors'])): ?>
             <div class="notice notice-warning"><p>Automatic sync needs attention (last run: <?php echo esc_html((string) ($auto_sync_status['last_run'] ?? 'unknown')); ?><?php echo !empty($auto_sync_status['continued']) ? '; scan in progress' : '; scan complete'; ?>):</p><ul>
                 <?php foreach ((array) $auto_sync_status['errors'] as $sync_error): ?>
@@ -2427,8 +2536,15 @@ function render_folder_import_page() {
                             <li style="margin-bottom: 10px;">
                                 <a href="<?php echo esc_url(add_query_arg(array('page' => 'folder-import', 'manga' => $manga), admin_url('admin.php'))); ?>"
                                    style="display: block; padding: 10px; background: <?php echo ($current_manga === $manga) ? '#e94560' : '#f5f5f5'; ?>; color: <?php echo ($current_manga === $manga) ? 'white' : '#333'; ?>; text-decoration: none; border-radius: 6px;">
-                                    📖 <strong><?php echo esc_html($manga); ?></strong>
-                                    <span style="float: right; font-size: 12px;">View chapters</span>
+                                    <span style="display: block;">📖 <strong><?php echo esc_html($manga); ?></strong></span>
+                                    <?php if (isset($latest_imports[$manga])): ?>
+                                        <span style="display: block; margin-top: 4px; font-size: 12px; opacity: .9;">
+                                            นำเข้าล่าสุด: <strong><?php echo esc_html($latest_imports[$manga]['label']); ?></strong>
+                                            · <?php echo esc_html($latest_imports[$manga]['date']); ?>
+                                        </span>
+                                    <?php else: ?>
+                                        <span style="display: block; margin-top: 4px; font-size: 12px; opacity: .9;">ยังไม่มีตอนที่เผยแพร่</span>
+                                    <?php endif; ?>
                                 </a>
                             </li>
                         <?php endforeach; ?>
