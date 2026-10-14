@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run under the tui-pi user from crontab @reboot. flock is held by this shell.
+# Run under the tui-pi user from cron. flock is held by this shell.
 set -eu
 
 app_dir="$HOME/.local/share/mangareader-watcher"

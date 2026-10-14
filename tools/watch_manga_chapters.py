@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Import changed manga folders through the signed WordPress endpoint.
 
-Runs on the WordPress host. Linux inotify supplies filesystem events; the
-persisted state is only used to recover changes across watcher restarts.
+inotify drives immediate imports. A low-frequency filesystem audit recovers
+missed events without polling WordPress or importing unchanged chapters.
 """
 from __future__ import annotations
 
@@ -21,12 +21,16 @@ import struct
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 
 ROOT_DEFAULT = Path("/mnt/hdd4/var/www/html/public/manga")
 CONFIG_DEFAULT = Path("/mnt/hdd4/var/www/html/public/wp-config.php")
 STATE_DEFAULT = Path.home() / ".local/state/mangareader-watcher/state.json"
 ENDPOINT = "https://mangareader.vvpns.com/wp-json/manga/v1/watcher-sync"
+AUDIT_INTERVAL = 15 * 60
+ROOT_CHECK_INTERVAL = 5
+EVENT_SETTLE_SECONDS = 2
+RECOVERY_SETTLE_SECONDS = 10
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"}
 EVENT = struct.Struct("iIII")
 IN_ATTRIB = 0x00000004
@@ -138,7 +142,8 @@ def send(endpoint: str, secret: bytes, relative: str, limit: int = 1) -> dict:
 
 
 class Watcher:
-    def __init__(self, root: Path, state_path: Path, endpoint: str, secret: bytes):
+    def __init__(self, root: Path, state_path: Path, endpoint: str, secret: bytes,
+                 audit_interval: int = AUDIT_INTERVAL):
         self.root = root.resolve(strict=True)
         self.state_path = state_path
         self.endpoint = endpoint
@@ -151,14 +156,21 @@ class Watcher:
         self.fd = -1
         self.watches: dict[int, Path] = {}
         self.next_send = 0.0
+        self.next_audit = time.monotonic() + audit_interval
+        self.next_root_check = 0.0
+        self.audit_interval = audit_interval
+        self.root_identity = self.identity()
         self.running = True
+
+    def identity(self) -> tuple[int, int]:
+        info = self.root.stat()
+        return info.st_dev, info.st_ino
 
     @staticmethod
     def safe_relative(relative: str) -> bool:
         parts = relative.split("/")
         return (2 <= len(parts) <= 5 and
-                all(part and part not in {".", ".."} and "\\" not in part for part in parts)
-                and not parts[0].startswith("."))
+                all(part and not part.startswith(".") and "\\" not in part for part in parts))
 
     def relative(self, path: Path) -> str | None:
         try:
@@ -173,15 +185,15 @@ class Watcher:
             "pending": list(self.pending),
         })
 
-    def queue(self, relative: str, priority: int) -> None:
+    def queue(self, relative: str, priority: int, delay: int = EVENT_SETTLE_SECONDS) -> None:
         if not self.safe_relative(relative):
             return
-        due = time.monotonic() + 2
+        due = time.monotonic() + delay
         if relative in self.pending:
             item = self.pending[relative]
             if priority > item["priority"]:
                 item["priority"] = priority
-            if priority >= 2:
+            if priority >= 2 or due < item["due"]:
                 item["due"] = due
             return
         self.pending[relative] = {"due": due, "priority": priority, "attempts": 0}
@@ -207,7 +219,12 @@ class Watcher:
 
     def walk_library(self) -> dict[str, str]:
         found: dict[str, str] = {}
-        for directory, child_dirs, _files in os.walk(self.root, followlinks=False):
+        def fail(error: OSError) -> None:
+            raise error
+
+        for directory, child_dirs, _files in os.walk(
+            self.root, followlinks=False, onerror=fail
+        ):
             folder = Path(directory)
             depth = len(folder.relative_to(self.root).parts)
             child_dirs[:] = [
@@ -227,27 +244,33 @@ class Watcher:
         return found
 
     def reconcile(self) -> None:
+        before = self.identity()
+        if before != self.root_identity:
+            raise OSError("Manga library changed during watch setup")
         current = self.walk_library()
+        if self.identity() != before:
+            raise OSError("Manga library changed during reconciliation")
         if not self.has_state:
             # Recover recent uploads during the Windows-to-Linux handover.
             cutoff = time.time() - 24 * 60 * 60
             for relative in current:
                 try:
                     if (self.root / relative).stat().st_mtime >= cutoff:
-                        self.queue(relative, 1)
+                        self.queue(relative, 1, RECOVERY_SETTLE_SECONDS)
                 except FileNotFoundError:
                     pass
         else:
             for relative, signature in current.items():
                 if self.saved.get(relative) != signature:
-                    self.queue(relative, 1)
+                    self.queue(relative, 1, RECOVERY_SETTLE_SECONDS)
         self.saved = current
         self.has_state = True
         self.persist()
+        self.next_audit = time.monotonic() + self.audit_interval
         log(f"Watching {len(self.watches)} folders; pending={len(self.pending)}")
 
-    def watch_new_tree(self, folder: Path) -> None:
-        if not folder.is_dir() or folder.is_symlink():
+    def watch_new_tree(self, folder: Path, moved: bool) -> None:
+        if folder.name.startswith(".") or not folder.is_dir() or folder.is_symlink():
             return
         for directory, child_dirs, _files in os.walk(folder, followlinks=False):
             current = Path(directory)
@@ -263,31 +286,33 @@ class Watcher:
             if depth >= 2:
                 relative = self.relative(current)
                 if relative and image_manifest(current):
-                    self.queue(relative, 2)
+                    self.queue(relative, 2 if moved else 1,
+                               EVENT_SETTLE_SECONDS if moved else RECOVERY_SETTLE_SECONDS)
 
-    def handle_event(self, wd: int, mask: int, name: str) -> None:
-        if mask & IN_Q_OVERFLOW:
-            log("Inotify overflow; rebuilding watches and reconciling")
+    def handle_event(self, wd: int, mask: int, name: str) -> bool:
+        if mask & (IN_Q_OVERFLOW | IN_MOVE_SELF | IN_DELETE_SELF):
+            log("Filesystem watch moved, deleted, or overflowed; rebuilding watches")
             self.init_inotify()
             self.reconcile()
-            return
+            return True
         folder = self.watches.get(wd)
         if folder is None:
-            return
+            return False
         path = folder / name if name else folder
         if mask & IN_IGNORED:
             self.watches.pop(wd, None)
-            return
+            return False
         if mask & IN_ISDIR:
             if mask & (IN_CREATE | IN_MOVED_TO):
-                self.watch_new_tree(path)
-            return
+                self.watch_new_tree(path, bool(mask & IN_MOVED_TO))
+            return False
         if path.suffix.lower() in EXTENSIONS and mask & (
-            IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_ATTRIB
+            IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE | IN_MOVED_FROM
         ):
             relative = self.relative(folder)
             if relative:
                 self.queue(relative, 2)
+        return False
 
     def read_events(self) -> None:
         while True:
@@ -303,7 +328,8 @@ class Watcher:
                 offset += EVENT.size
                 name = os.fsdecode(data[offset:offset + name_length].split(b"\0", 1)[0])
                 offset += name_length
-                self.handle_event(wd, mask, name)
+                if self.handle_event(wd, mask, name):
+                    return
 
     def sync_ready(self) -> None:
         now = time.monotonic()
@@ -326,6 +352,8 @@ class Watcher:
             return
         time.sleep(1)
         self.read_events()
+        if item["due"] > time.monotonic():
+            return
         after = image_manifest(folder)
         if before != after or after is None:
             item["due"] = time.monotonic() + 2
@@ -355,19 +383,35 @@ class Watcher:
         self.reconcile()
         while self.running:
             try:
+                now = time.monotonic()
+                if now >= self.next_root_check:
+                    self.next_root_check = now + ROOT_CHECK_INTERVAL
+                    if self.identity() != self.root_identity:
+                        log("Manga library mount changed; rebuilding watches")
+                        self.root_identity = self.identity()
+                        self.init_inotify()
+                        self.reconcile()
+                if now >= self.next_audit:
+                    self.reconcile()
                 self.sync_ready()
                 now = time.monotonic()
                 due = min(
                     (item["due"] for item in self.pending.values()),
                     default=now + 30,
                 )
-                timeout = max(0.1, min(1.0, due - now))
+                timeout = max(0.1, min(1.0, due - now,
+                                       self.next_audit - now,
+                                       self.next_root_check - now))
                 readable, _, _ = select.select([self.fd], [], [], timeout)
                 if readable:
                     self.read_events()
             except (OSError, ValueError) as error:
                 log(f"Recovering filesystem watcher: {error}")
-                time.sleep(2)
+                time.sleep(5)
+                try:
+                    self.root_identity = self.identity()
+                except (OSError, ValueError):
+                    continue
                 self.init_inotify()
                 self.reconcile()
 
@@ -382,9 +426,13 @@ def main() -> int:
     parser.add_argument("--wp-config", type=Path, default=CONFIG_DEFAULT)
     parser.add_argument("--state", type=Path, default=STATE_DEFAULT)
     parser.add_argument("--endpoint", default=ENDPOINT)
+    parser.add_argument("--audit-interval", type=int, default=AUDIT_INTERVAL)
     arguments = parser.parse_args()
+    if arguments.audit_interval < 30:
+        parser.error("--audit-interval must be at least 30 seconds")
     secret = secret_from_wp_config(arguments.wp_config)
-    watcher = Watcher(arguments.root, arguments.state, arguments.endpoint, secret)
+    watcher = Watcher(arguments.root, arguments.state, arguments.endpoint, secret,
+                      arguments.audit_interval)
     signal.signal(signal.SIGTERM, lambda _signum, _frame: setattr(watcher, "running", False))
     signal.signal(signal.SIGINT, lambda _signum, _frame: setattr(watcher, "running", False))
     try:
