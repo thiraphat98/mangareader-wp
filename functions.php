@@ -2469,7 +2469,7 @@ function render_folder_import_page() {
     <div class="wrap">
         <h1>📁 Import from Folder</h1>
         <p>Import manga chapters by linking directly to files in your manga folder. Images are not copied to the Media Library.</p>
-        <p class="description"><strong>Automatic discovery is enabled.</strong> File and folder changes are imported continuously by the Windows watcher.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
+        <p class="description"><strong>Automatic discovery is enabled.</strong> File and folder changes are imported continuously by the watcher on the web server.<?php if (!empty($auto_sync_status['last_run'])): ?> Last check: <?php echo esc_html($auto_sync_status['last_run']); ?> — added <?php echo absint($auto_sync_status['manga_created'] ?? 0); ?> manga and <?php echo absint($auto_sync_status['chapters_created'] ?? 0); ?> chapters.<?php endif; ?></p>
         <?php if (!empty($auto_sync_status['errors'])): ?>
             <div class="notice notice-warning"><p>Automatic sync needs attention (last run: <?php echo esc_html((string) ($auto_sync_status['last_run'] ?? 'unknown')); ?><?php echo !empty($auto_sync_status['continued']) ? '; scan in progress' : '; scan complete'; ?>):</p><ul>
                 <?php foreach ((array) $auto_sync_status['errors'] as $sync_error): ?>
