@@ -69,15 +69,22 @@ function ChapterPath([string]$path) {
     if ($parts.Count -lt 2 -or $parts.Count -gt 5 -or $parts[0].StartsWith('.')) { return $null }
     return $folder
 }
-function Queue([string]$folder, [bool]$save = $true) {
-    if (-not $folder -or $script:pending.ContainsKey($folder)) { return }
-    $script:pending[$folder] = @{ due = [DateTime]::UtcNow.AddSeconds(2); attempts = 0 }
+function Queue([string]$folder, [bool]$save = $true, [int]$priority = 1) {
+    if (-not $folder) { return }
+    if ($script:pending.ContainsKey($folder)) {
+        if ($priority -gt [int]$script:pending[$folder].priority) {
+            $script:pending[$folder].priority = $priority
+            $script:pending[$folder].due = [DateTime]::UtcNow.AddSeconds(2)
+        }
+        return
+    }
+    $script:pending[$folder] = @{ due = [DateTime]::UtcNow.AddSeconds(2); attempts = 0; priority = $priority }
     Log "Queued $((Relative $folder))"
     if ($save) { SaveQueue }
 }
 function QueueEventPath([string]$path) {
     $folder = ChapterPath $path
-    if ($folder) { Queue $folder }
+    if ($folder) { Queue $folder $true 2 }
 }
 function Inventory {
     $found = @{}
@@ -201,7 +208,7 @@ try {
     if (Test-Path -LiteralPath $queuePath) {
         foreach ($relative in @(Get-Content -LiteralPath $queuePath -Raw -Encoding UTF8 | ConvertFrom-Json)) {
             $folder = Join-Path $root ([string]$relative).Replace('/', '\')
-            if (ChapterPath $folder) { Queue $folder $false }
+            if (ChapterPath $folder) { Queue $folder $false 0 }
         }
     }
     $hadSnapshot = Test-Path -LiteralPath $snapshotPath
@@ -223,7 +230,7 @@ try {
                 if ($event) { HandleEvent $event }
                 continue
             }
-            $folder = [string]$ready[0]
+            $folder = [string]($ready | Sort-Object -Property @{ Expression = { $script:pending[$_].priority }; Descending = $true }, @{ Expression = { $script:pending[$_].due }; Descending = $false } | Select-Object -First 1)
             $before = Manifest $folder
             if (-not $before) {
                 $script:pending.Remove($folder)
