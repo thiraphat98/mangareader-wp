@@ -1,4 +1,30 @@
-<?php get_header(); ?>
+<?php
+get_header();
+
+$popular_manga = get_posts(array(
+    'post_type' => 'manga',
+    'posts_per_page' => 5,
+    'orderby' => array('comment_count' => 'DESC', 'date' => 'DESC', 'ID' => 'DESC'),
+));
+if (empty($popular_manga)) {
+    $popular_manga = get_posts(array(
+        'post_type' => 'manga',
+        'posts_per_page' => 5,
+        'orderby' => array('date' => 'DESC', 'ID' => 'DESC'),
+    ));
+}
+
+$manga_query = new WP_Query(array(
+    'post_type' => 'manga',
+    'posts_per_page' => -1,
+    'orderby' => 'modified',
+    'order' => 'DESC',
+    'no_found_rows' => true,
+));
+$manga_ids = array_merge(wp_list_pluck($popular_manga, 'ID'), wp_list_pluck($manga_query->posts, 'ID'));
+$chapter_groups = manga_chapters_by_manga_ids($manga_ids);
+manga_sort_posts_by_latest_chapter($manga_query->posts, $chapter_groups);
+?>
 
 <div class="homepage-content">
     <!-- Featured Manga Section -->
@@ -14,23 +40,6 @@
         <div class="featured-container">
             <div class="featured-slider" id="featuredSlider">
                 <?php
-                // Get popular manga
-                $popular_manga = get_posts(array(
-                    'post_type' => 'manga',
-                    'posts_per_page' => 5,
-                    'orderby' => 'comment_count',
-                    'order' => 'DESC'
-                ));
-                
-                if (empty($popular_manga)) {
-                    $popular_manga = get_posts(array(
-                        'post_type' => 'manga',
-                        'posts_per_page' => 5,
-                        'orderby' => 'date',
-                        'order' => 'DESC'
-                    ));
-                }
-                
                 foreach ($popular_manga as $index => $manga):
                     $manga_id = $manga->ID;
                     $manga_title = get_the_title($manga_id);
@@ -48,15 +57,7 @@
                     $description = $manga->post_excerpt ?: wp_trim_words($manga->post_content, 60, '...');
                     
                     // Get chapter count
-                    $chapters = get_posts(array(
-                        'post_type' => 'chapter',
-                        'meta_key' => 'connected_manga_id',
-                        'meta_value' => $manga_id,
-                        'post_status' => 'publish',
-                        'posts_per_page' => -1,
-                        'orderby' => 'date',
-                        'order' => 'DESC'
-                    ));
+                    $chapters = $chapter_groups[$manga_id] ?? array();
                     $chapter_count = count($chapters);
                     $latest_chapter = !empty($chapters) ? $chapters[0] : null;
                     
@@ -68,7 +69,7 @@
                     ?>
                     <div class="featured-item">
                         <div class="featured-cover">
-                            <img src="<?php echo esc_url($manga_cover); ?>" alt="<?php echo esc_attr($manga_title); ?>" loading="eager" fetchpriority="high" decoding="async">
+                            <img <?php if ($index === 0): ?>src="<?php echo esc_url($manga_cover); ?>" loading="eager" fetchpriority="high"<?php else: ?>data-src="<?php echo esc_url($manga_cover); ?>" loading="lazy"<?php endif; ?> alt="<?php echo esc_attr($manga_title); ?>" decoding="async">
                             <div class="featured-overlay">
                                 <a href="<?php echo get_permalink($manga_id); ?>" class="featured-btn">View Details</a>
                             </div>
@@ -113,13 +114,6 @@
             
             <div id="manga-container">
                 <?php
-                $manga_query = new WP_Query(array(
-                    'post_type' => 'manga',
-                    'posts_per_page' => -1,
-                    'orderby' => 'modified',
-                    'order' => 'DESC'
-                ));
-                
                 if ($manga_query->have_posts()) :
                     echo '<div class="manga-grid">';
                     while ($manga_query->have_posts()) : $manga_query->the_post();
@@ -128,7 +122,7 @@
                         $manga_cover = manga_get_cover_url(get_the_ID(), 'manga-cover-small');
                         
                         // Get chapters sorted by volume and chapter number
-                        $all_chapters = get_sorted_chapters_for_manga($manga_id);
+                        $all_chapters = manga_sort_chapter_posts($chapter_groups[$manga_id] ?? array());
                         $recent_chapters = array_slice($all_chapters, 0, 3);
                         ?>
                         <div class="manga-item">
@@ -232,8 +226,19 @@ jQuery(document).ready(function($) {
     // Featured Slider
     var currentSlide = 0;
     var totalSlides = $('.featured-item').length;
+
+    function loadFeaturedImage(index) {
+        var image = $('.featured-item').eq(index).find('img[data-src]')[0];
+        if (image) {
+            image.src = image.dataset.src;
+            image.removeAttribute('data-src');
+        }
+    }
     
     function updateSlider() {
+        if (!totalSlides) return;
+        loadFeaturedImage(currentSlide);
+        loadFeaturedImage((currentSlide + 1) % totalSlides);
         var newTransform = -currentSlide * 100 + '%';
         $('.featured-slider').css('transform', 'translateX(' + newTransform + ')');
         
@@ -266,6 +271,7 @@ jQuery(document).ready(function($) {
         var dotClass = i === 0 ? 'featured-dot active' : 'featured-dot';
         $('#featuredDots').append('<div class="' + dotClass + '" data-slide="' + i + '"></div>');
     }
+    if (totalSlides > 1) loadFeaturedImage(1);
     
     $('#featuredNext').on('click', nextSlide);
     $('#featuredPrev').on('click', prevSlide);

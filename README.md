@@ -67,6 +67,22 @@ Chapter List:
 
 ## 📋 System Requirements
 
+### Server-side chapter watcher
+
+`tools/watch_manga_chapters.py` runs on the WordPress host as `tui-pi` and
+observes the local `/manga/` tree with Linux inotify. It signs one-chapter
+requests to the local WordPress REST endpoint using `MANGA_WATCHER_SECRET` from
+`wp-config.php`. It waits for file close, checks that the image list is stable,
+and sends at most one request per second. Its state is stored outside the web
+root in `~/.local/state/mangareader-watcher/state.json`.
+
+The watcher compares filesystem signatures every 15 minutes to recover lost
+events, without querying WordPress for unchanged folders. It also detects a
+replaced manga mount and rebuilds its watches. Cron starts the locked wrapper
+at boot and checks once per minute that it is still running; the minute check
+only maintains the process and does not trigger an import. Logs are at
+`~/.local/state/mangareader-watcher/watcher.log`.
+
 - WordPress 5.0 or higher
 - PHP 7.4 or higher
 - MySQL 5.6 or higher

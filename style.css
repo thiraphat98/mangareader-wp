@@ -2084,6 +2084,10 @@ body.sepia-mode .reader-top-bar {
 }
 
 @media (max-width: 768px) {
+    body.menu-open .site-header {
+        z-index: 1002;
+    }
+
     .container {
         padding: 0 16px;
     }

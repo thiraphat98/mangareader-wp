@@ -101,22 +101,16 @@ get_header(); ?>
 
 <script>
 jQuery(document).ready(function($) {
-    // Alphabet filter click handler
-    $('.alphabet-filter a').click(function(e) {
-        e.preventDefault();
-        $('.alphabet-filter a').removeClass('active');
-        $(this).addClass('active');
-        
-        var letter = $(this).data('letter');
-        var sortBy = $('.sort-btn.active').data('sort');
-        
+    function loadFilteredManga(page) {
         $.ajax({
-            url: '<?php echo admin_url('admin-ajax.php'); ?>',
+            url: '<?php echo esc_url(admin_url('admin-ajax.php')); ?>',
             type: 'POST',
             data: {
                 action: 'filter_manga',
-                letter: letter,
-                sort_by: sortBy,
+                letter: $('.alphabet-filter a.active').data('letter') || 'all',
+                sort_by: $('.sort-btn.active').data('sort') || 'alphabetical',
+                paged: page,
+                page_size: 24,
                 nonce: '<?php echo wp_create_nonce("manga_filter_nonce"); ?>'
             },
             beforeSend: function() {
@@ -124,15 +118,21 @@ jQuery(document).ready(function($) {
             },
             success: function(response) {
                 $('#manga-container').html(response);
-                // Scroll to top of results
-                $('html, body').animate({
-                    scrollTop: $('#manga-container').offset().top - 50
-                }, 300);
+                $('html, body').animate({scrollTop: $('#manga-container').offset().top - 50}, 300);
             },
             error: function() {
                 $('#manga-container').html('<div class="no-results"><p>Error loading manga. Please refresh the page.</p></div>');
             }
         });
+    }
+
+    // Alphabet filter click handler
+    $('.alphabet-filter a').click(function(e) {
+        e.preventDefault();
+        $('.alphabet-filter a').removeClass('active');
+        $(this).addClass('active');
+        
+        loadFilteredManga(1);
     });
     
     // Sort button click handler
@@ -140,32 +140,12 @@ jQuery(document).ready(function($) {
         $('.sort-btn').removeClass('active');
         $(this).addClass('active');
         
-        var sortBy = $(this).data('sort');
-        var letter = $('.alphabet-filter a.active').data('letter') || 'all';
-        
-        $.ajax({
-            url: '<?php echo admin_url('admin-ajax.php'); ?>',
-            type: 'POST',
-            data: {
-                action: 'filter_manga',
-                letter: letter,
-                sort_by: sortBy,
-                nonce: '<?php echo wp_create_nonce("manga_filter_nonce"); ?>'
-            },
-            beforeSend: function() {
-                $('#manga-container').html('<div class="loading-container"><div class="spinner"></div></div>');
-            },
-            success: function(response) {
-                $('#manga-container').html(response);
-                // Scroll to top of results
-                $('html, body').animate({
-                    scrollTop: $('#manga-container').offset().top - 50
-                }, 300);
-            },
-            error: function() {
-                $('#manga-container').html('<div class="no-results"><p>Error loading manga. Please refresh the page.</p></div>');
-            }
-        });
+        loadFilteredManga(1);
+    });
+
+    $('#manga-container').on('click', '.pagination a[data-page]', function(e) {
+        e.preventDefault();
+        loadFilteredManga(parseInt($(this).attr('data-page'), 10) || 1);
     });
 });
 </script>
